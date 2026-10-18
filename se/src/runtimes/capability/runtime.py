@@ -1478,6 +1478,23 @@ class CapabilityRuntime(BaseRuntime):
                     "for Agent-owned capability invocations."
                 )
 
+        # D2 negative native issuance fence: even a nested Agent caller that
+        # bypasses the Agent adapter is denied before registry resolution.
+        # The caller_agent_execution_id scalar is deny-only, never evidence of
+        # broker permission or an OS-owned native receipt.
+        if caller_agent_execution_id is not None and type(capability_id) is str:
+            from .native_tree_recovery_b0 import AGENT_UNCERTIFIED_PROCESS_IDS
+            if capability_id in AGENT_UNCERTIFIED_PROCESS_IDS:
+                raise CapabilityError(
+                    code="SBX3_NATIVE_RECEIPT_UNAVAILABLE",
+                    message="Agent Native execution lacks authenticated broker receipt.",
+                    category="SECURITY",
+                    retryable=False,
+                    safe_for_client=True,
+                    capability_id=capability_id,
+                    invocation_id=invocation_id,
+                )
+
         # Deny-only Agent taint at the canonical runtime boundary. This also
         # covers nested workflow calls that bypass the top-level Agent adapter.
         # The caller-provided scalar cannot grant privilege; it can only cause
