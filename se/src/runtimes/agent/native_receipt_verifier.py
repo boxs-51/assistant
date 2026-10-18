@@ -11,8 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Canonical Native IDs plus the already recognized process aliases used by
+# SBX3 Agent policy. A renamed registration is still a process capability;
+# neither caller metadata nor alias spelling can bypass the receipt boundary.
 NATIVE_AGENT_CAPABILITIES = frozenset({
     "terminal.run", "terminal.launch", "python.run",
+    "plugin.terminal.run", "plugin.terminal.launch", "plugin.python.run",
 })
 
 
