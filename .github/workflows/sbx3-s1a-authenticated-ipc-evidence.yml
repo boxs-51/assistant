@@ -1,0 +1,499 @@
+name: SBX3 S1A Two-OS Authenticated IPC Proof
+on:
+  pull_request:
+    branches:
+      - feature/164-s1a-v2-deny-only-service-registration-20261013
+permissions:
+  contents: read
+concurrency:
+  group: sbx3-s1a-ci-417
+  cancel-in-progress: true
+jobs:
+  linux-native-principal:
+    if: github.event.pull_request.head.repo.full_name == 'boxs-51/assistant' && github.event.pull_request.head.ref == 'feature/417-s1a-native-ipc-ci-pr498-20261013'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Validate exact source SHA, one-file delta and component blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+          def git(*a): return subprocess.check_output(["git",*a],text=True).strip()
+          assert git("merge-base","ba36bd12bc3d903c6a5cb0d0497c28a0dc541a33","HEAD")=="ba36bd12bc3d903c6a5cb0d0497c28a0dc541a33"
+          assert git("diff","--name-only","ba36bd12bc3d903c6a5cb0d0497c28a0dc541a33","HEAD")==".github/workflows/sbx3-s1a-authenticated-ipc-evidence.yml"
+          hashes={
+          "se/src/runtimes/capability/native_privileged_broker_s1a.py":"f263055ecb0876cdf2f72ceded723d15bc18a951",
+          "se/src/runtimes/capability/native_broker_registration_s1a.py":"2c7c48c1ffbd7f4efff2bdfc34e6718f911de194",
+          "se/src/runtimes/capability/native_broker_ipc_linux_s1a.py":"c622851415e9c24e77698e45de70abb8bcab59b8",
+          "se/src/runtimes/capability/native_broker_ipc_windows_s1a.py":"4d796e42cb3959adf018ee86d66dc7683340cc6a",
+          "se/src/runtimes/capability/native_broker_service_s1a.py":"7aa212ff47707bdeec18913028297ebca1adc0d2",
+          "se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py":"69dd297fbb91f55eb63eefc842a846f319ccd940",
+          "docs/capability_runtime/SBX3_S1A_PRIVILEGED_IPC_CONTRACT.md":"dc215d4a23388dd43baab69fa4fc2633c3316702"}
+          for p,h in hashes.items(): assert git("hash-object",p)==h,p
+          print("SOURCE_PIN=PASS")
+          PY
+      - name: Install pinned dependencies
+        run: python -m pip install pytest==9.1.1 pytest-asyncio==1.4.0
+      - name: Linux distinct UIDs, protected service, hard crash/restart and mandatory tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SBX3_S1A_NATIVE_REQUIRED=1
+          mkdir -p "$RUNNER_TEMP/s1a-proof"
+          service_pid=''
+          cleanup() {
+            if [ -n "$service_pid" ]; then sudo kill -TERM "$service_pid" 2>/dev/null || true; fi
+          }
+          trap cleanup EXIT
+          sudo groupadd --system sbx3ipc
+          sudo useradd --system -M -g sbx3ipc -s /usr/sbin/nologin sbx3broker
+          sudo useradd --system -M -s /usr/sbin/nologin sbx3client
+          sudo useradd --system -M -s /usr/sbin/nologin sbx3foreign
+          sudo useradd --system -M -s /usr/sbin/nologin sbx3blocked
+          sudo usermod -aG sbx3ipc sbx3client
+          # Foreign UID can CONNECT through DAC, then broker must reject
+          # actual kernel SO_PEERCRED mismatch (not just permission denied).
+          sudo usermod -aG sbx3ipc sbx3foreign
+          PUBSRC="/opt/sbx3s1a-readonly-source"
+          sudo install -d -o root -g root -m 0755 "$PUBSRC"
+          sudo tar -C "$GITHUB_WORKSPACE" -cf -             se/src/runtimes/capability/native_privileged_broker_s1a.py             se/src/runtimes/capability/native_broker_registration_s1a.py             se/src/runtimes/capability/native_broker_ipc_linux_s1a.py             se/src/runtimes/capability/native_broker_ipc_windows_s1a.py             se/src/runtimes/capability/native_broker_service_s1a.py             se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py | sudo tar -C "$PUBSRC" -xf -
+          sudo find "$PUBSRC" -type d -exec chmod 0755 {} +
+          sudo find "$PUBSRC" -type f -exec chmod 0644 {} +
+          test "$(sudo stat -c %u "$PUBSRC")" = 0
+          STATE="/opt/sbx3s1a-ci-private-state"
+          IPC="/opt/sbx3s1a-ci-ipc"
+          SOCK="$IPC/service.sock"
+          PYEXE="$(command -v python)"
+          sudo install -d -o sbx3broker -g sbx3ipc -m 0700 "$STATE"
+          sudo install -d -o sbx3broker -g sbx3ipc -m 0710 "$IPC"
+          python -c 'import json,sys;json.dump(dict(service_name="SBX3S1ACI",state_directory=sys.argv[1],linux_socket=sys.argv[2],allowed_linux_uid=int(sys.argv[3]),windows_pipe=r"\\.\pipe\SBX3S1A-CI",windows_service_sid="S-1-5-80-1",windows_allowed_client_sid="S-1-5-21-1"),sys.stdout)' "$STATE" "$SOCK" "$(id -u sbx3client)" > "$RUNNER_TEMP/service.json"
+          sudo install -o sbx3broker -g sbx3ipc -m 0600 "$RUNNER_TEMP/service.json" "$STATE/config.json"
+          rm "$RUNNER_TEMP/service.json"
+          launch() {
+            sudo -n -u sbx3broker env PYTHONPATH="$PUBSRC" "$PYEXE" -m se.src.runtimes.capability.native_broker_service_s1a --config "$STATE/config.json" >> "$RUNNER_TEMP/s1a-service.log" 2>&1 &
+            for attempt in $(seq 1 50); do
+              if sudo test -S "$SOCK"; then break; fi
+              sleep .2
+            done
+            if ! sudo test -S "$SOCK"; then
+              echo "Real AF_UNIX service absent; redacted broker stderr follows" >&2
+              if test -f "$RUNNER_TEMP/s1a-service.log"; then
+                sed -E 's/epoch=[a-f0-9]{32}/epoch=[REDACTED]/g' "$RUNNER_TEMP/s1a-service.log" >&2
+              fi
+              return 1
+            fi
+            service_pid="$(pgrep -u "$(id -u sbx3broker)" -f 'native_broker_service_s1a' | tail -1)"
+            test -n "$service_pid"
+            sudo kill -0 "$service_pid"
+          }
+          launch
+          export SBX3_S1A_TEST_SOCKET="$SOCK"
+          export SBX3_S1A_TEST_BROKER_UID="$(id -u sbx3broker)"
+          export SBX3_S1A_TEST_CLIENT_USER=sbx3client
+          export SBX3_S1A_TEST_FOREIGN_USER=sbx3foreign
+          export SBX3_S1A_TEST_DAC_DENIED_USER=sbx3blocked
+          sudo -n -u sbx3client env PYTHONPATH="$PUBSRC" "$PYEXE" -m se.src.runtimes.capability.native_privileged_broker_s1a --linux-socket "$SOCK" --epoch "" > "$RUNNER_TEMP/first.json"
+          export SBX3_S1A_TEST_PREVIOUS_EPOCH="$(python -c 'import json,sys;print(json.load(open(sys.argv[1]))["broker_epoch"])' "$RUNNER_TEMP/first.json")"
+          export SBX3_S1A_TEST_PREVIOUS_SERVICE_PID="$service_pid"
+          sudo kill -KILL "$service_pid"
+          for attempt in $(seq 1 30); do
+            if ! sudo kill -0 "$service_pid" 2>/dev/null; then break; fi
+            sleep .2
+          done
+          sudo test -S "$SOCK"
+          test "$(sudo stat -c %u "$SOCK")" = "$(id -u sbx3broker)"
+          sudo rm -- "$SOCK"
+          launch
+          test "$service_pid" != "$SBX3_S1A_TEST_PREVIOUS_SERVICE_PID"
+          export SBX3_S1A_TEST_CURRENT_SERVICE_PID="$service_pid"
+          PYTHONPATH="$PUBSRC" python -m pytest -q -ra --junitxml "$RUNNER_TEMP/s1a-proof/linux.xml" \
+            "$PUBSRC/se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py"::test_s1a_linux_native_distinct_uid_so_peercred_transport_denies_effects \
+            "$PUBSRC/se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py"::test_s1a_linux_native_alias_replay_stale_and_missing_socket_deny \
+            "$PUBSRC/se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py"::test_s1a_linux_native_hard_crash_restart_rejects_old_epoch
+          python - "$RUNNER_TEMP/s1a-proof/linux.xml" <<'PY'
+          import xml.etree.ElementTree as X,sys
+          n=list(X.parse(sys.argv[1]).getroot().iter("testcase"))
+          assert len(n)==3
+          assert not any(c.find(t) is not None for c in n for t in ("skipped","failure","error"))
+          print("LINUX_NATIVE=3_PASS_0_SKIP")
+          PY
+          python -c 'import json,os;print(json.dumps({k:os.getenv(k) for k in ("SBX3_S1A_TEST_BROKER_UID","SBX3_S1A_TEST_PREVIOUS_SERVICE_PID","SBX3_S1A_TEST_CURRENT_SERVICE_PID")}))' > "$RUNNER_TEMP/s1a-proof/linux-identity.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbx3-s1a-linux-proof
+          path: ${{ runner.temp }}/s1a-proof
+          if-no-files-found: ignore
+
+  windows-native-principal:
+    if: github.event.pull_request.head.repo.full_name == 'boxs-51/assistant' && github.event.pull_request.head.ref == 'feature/417-s1a-native-ipc-ci-pr498-20261013'
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Validate exact parent and seven source blobs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          @'
+          import subprocess
+          def git(*a):return subprocess.check_output(["git",*a],text=True).strip()
+          assert git("merge-base","ba36bd12bc3d903c6a5cb0d0497c28a0dc541a33","HEAD")=="ba36bd12bc3d903c6a5cb0d0497c28a0dc541a33"
+          assert git("diff","--name-only","ba36bd12bc3d903c6a5cb0d0497c28a0dc541a33","HEAD")==".github/workflows/sbx3-s1a-authenticated-ipc-evidence.yml"
+          hashes={
+          "se/src/runtimes/capability/native_privileged_broker_s1a.py":"f263055ecb0876cdf2f72ceded723d15bc18a951",
+          "se/src/runtimes/capability/native_broker_registration_s1a.py":"2c7c48c1ffbd7f4efff2bdfc34e6718f911de194",
+          "se/src/runtimes/capability/native_broker_ipc_linux_s1a.py":"c622851415e9c24e77698e45de70abb8bcab59b8",
+          "se/src/runtimes/capability/native_broker_ipc_windows_s1a.py":"4d796e42cb3959adf018ee86d66dc7683340cc6a",
+          "se/src/runtimes/capability/native_broker_service_s1a.py":"7aa212ff47707bdeec18913028297ebca1adc0d2",
+          "se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py":"69dd297fbb91f55eb63eefc842a846f319ccd940",
+          "docs/capability_runtime/SBX3_S1A_PRIVILEGED_IPC_CONTRACT.md":"dc215d4a23388dd43baab69fa4fc2633c3316702"}
+          for p,h in hashes.items(): assert git("hash-object",p)==h,p
+          print("SOURCE_PIN=PASS")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Source drift detected' }
+      - name: Install pinned dependencies
+        shell: pwsh
+        run: |
+          python -m pip install pytest==9.1.1 pytest-asyncio==1.4.0
+          if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
+      - name: Real SCM LocalService, restricted named pipe, hard restart and low-privilege tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $svc='SBX3S1ACI'
+          $client='sbx3client'
+          $foreign='sbx3foreign'
+          $py=(Get-Command python).Source
+          $state=Join-Path $env:ProgramData 'SBX3S1ACI'
+          $ev=Join-Path $env:RUNNER_TEMP 's1a-proof'
+          New-Item -ItemType Directory -Force -Path $ev | Out-Null
+          $pipe='\\.\pipe\SBX3S1A-CI417'
+          try {
+            $plain=[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))+'Aa7!'
+            $password=ConvertTo-SecureString $plain -AsPlainText -Force
+            New-LocalUser -Name $client -Password $password -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+            $credential=[PSCredential]::new("$env:COMPUTERNAME\$client",$password)
+            $clientSid=(Get-LocalUser $client).SID.Value
+            $plain=$null
+            $foreignPlain=[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))+'Bb9!'
+            $foreignPassword=ConvertTo-SecureString $foreignPlain -AsPlainText -Force
+            New-LocalUser -Name $foreign -Password $foreignPassword -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+            $foreignCredential=[PSCredential]::new("$env:COMPUTERNAME\$foreign",$foreignPassword)
+            $foreignSid=(Get-LocalUser $foreign).SID.Value
+            if ($foreignSid -eq $clientSid) { throw 'Foreign and client SIDs coincide' }
+            $foreignPlain=$null
+            $serviceSid=[regex]::Match((& sc.exe showsid $svc | Out-String),'S-1-5-80-(?:\d+-){4}\d+').Value
+            if (-not $serviceSid) { throw 'Real service SID unavailable' }
+            New-Item -ItemType Directory -Force -Path $state | Out-Null
+            # P1 ACL regression: plant a dangerous *explicit* Everyone ACE.
+            # icacls /inheritance:r /grant:r alone preserves such an ACE.
+            & icacls $state /grant '*S-1-1-0:(OI)(CI)F' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Adversarial explicit-ACE fixture failed' }
+            $preAcl=(Get-Acl -LiteralPath $state)
+            if (-not @($preAcl.Access | Where-Object {
+              $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-1-0'
+            }).Count) { throw 'Everyone explicit-ACE fixture was not installed' }
+
+            # Authoritative protected allowlist: remove ALL pre-existing
+            # explicit/inherited DACL ACEs, do not append to a stale DACL.
+            $stateAcl=New-Object System.Security.AccessControl.DirectorySecurity
+            $stateAcl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;LS)(A;OICI;FA;;;BA)')
+            Set-Acl -LiteralPath $state -AclObject $stateAcl
+
+            function Assert-ProtectedAcl([string]$target,[string[]]$expected,
+                                          [bool]$allowTrustedInheritance=$false) {
+              $a=Get-Acl -LiteralPath $target
+              if (-not $a.AreAccessRulesProtected -and -not $allowTrustedInheritance) {
+                throw "Unprotected inherited ACL on $target"
+              }
+              $actual=@()
+              foreach ($entry in @($a.Access)) {
+                $sid=$entry.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+                if ($entry.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
+                  throw "Unexpected deny/unknown ACE on $target"
+                }
+                if (($entry.IsInherited -and -not $allowTrustedInheritance) -or
+                    $sid -notin $expected) {
+                  throw "Unexpected ACE $sid on $target"
+                }
+                $actual += $sid
+              }
+              if ($actual.Count -ne $expected.Count) { throw "ACE count mismatch on $target" }
+              foreach ($sid in $expected) {
+                if ($sid -notin $actual) { throw "Missing protected SID $sid on $target" }
+              }
+              Write-Output "PROTECTED_ACL=PASS $target"
+            }
+            $trustedStateSids=@('S-1-5-18','S-1-5-19','S-1-5-32-544')
+            Assert-ProtectedAcl $state $trustedStateSids
+            & icacls $ev /grant "$($client):(OI)(CI)M" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Client results ACL refused' }
+            $cfg=Join-Path $state 'config.json'
+            @{service_name=$svc;state_directory=$state;linux_socket='C:\unused';allowed_linux_uid=0;windows_pipe=$pipe;windows_service_sid=$serviceSid;windows_allowed_client_sid=$clientSid} | ConvertTo-Json -Compress | Set-Content -Encoding utf8 -Path $cfg
+            $cfgAcl=New-Object System.Security.AccessControl.FileSecurity
+            $cfgAcl.SetSecurityDescriptorSddlForm('D:P(A;;FR;;;LS)(A;;FA;;;SY)(A;;FA;;;BA)')
+            Set-Acl -LiteralPath $cfg -AclObject $cfgAcl
+            Assert-ProtectedAcl $cfg $trustedStateSids
+            $image='"'+$py+'" -m se.src.runtimes.capability.native_broker_service_s1a --config "'+$cfg+'" --scm'
+            & sc.exe create $svc binPath= $image type= own start= demand obj= 'NT AUTHORITY\LocalService' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Real SCM registration refused' }
+            & sc.exe sidtype $svc unrestricted | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Service SID setup refused' }
+            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name Environment -PropertyType MultiString -Value @("PYTHONPATH=$env:GITHUB_WORKSPACE") -Force | Out-Null
+            & sc.exe start $svc | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Actual SCM service failed to start' }
+            $oldPid=0
+            for ($i=0;$i -lt 60;$i++) {
+              Start-Sleep -Milliseconds 250
+              $status=(& sc.exe queryex $svc | Out-String)
+              if ($status -match 'RUNNING' -and $status -match 'PID\s*:\s*([1-9]\d*)' -and (Test-Path (Join-Path $state 's1a_registration.db'))) { $oldPid=[int]$Matches[1]; break }
+            }
+            if ($oldPid -le 0) { throw 'Actual service epoch/SCM process absent' }
+            $db=Join-Path $state 's1a_registration.db'
+            # SQLite inherits only the three trusted ACEs from protected state.
+            Assert-ProtectedAcl $db $trustedStateSids $true
+            $oldEpoch=(& $py -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute('SELECT epoch FROM s1a_epoch_log ORDER BY rowid DESC LIMIT 1').fetchone()[0])" $db | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0 -or $oldEpoch -notmatch '^[a-f0-9]{32}$') { throw 'Cannot attest old epoch' }
+            Stop-Process -Id $oldPid -Force
+            $stopped=$false
+            for ($i=0;$i -lt 50;$i++) {
+              Start-Sleep -Milliseconds 250
+              if ((& sc.exe queryex $svc | Out-String) -match 'STOPPED') { $stopped=$true; break }
+            }
+            if (-not $stopped) { throw 'Hard broker kill did not reach SCM stopped state' }
+            & sc.exe start $svc | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Real SCM restart failed' }
+            $newPid=0
+            for ($i=0;$i -lt 60;$i++) {
+              Start-Sleep -Milliseconds 250
+              $status=(& sc.exe queryex $svc | Out-String)
+              if ($status -match 'RUNNING' -and $status -match 'PID\s*:\s*([1-9]\d*)') {
+                $newPid=[int]$Matches[1]
+                if ($newPid -ne $oldPid) { break }
+              }
+            }
+            if ($newPid -le 0 -or $newPid -eq $oldPid) { throw 'SCM broker PID did not change' }
+            # The real low-integrity client cannot traverse the broker-only state directory.
+            # Give it an independent test-only output directory, never the protected ledger.
+            $clientDir=Join-Path $env:ProgramData 'SBX3S1A-CI417-client'
+            New-Item -ItemType Directory -Force -Path $clientDir | Out-Null
+            & icacls $clientDir /inheritance:r /grant:r "*$($clientSid):(OI)(CI)M" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Client-only directory ACL refused' }
+            # The foreign Windows account reads a CI-owned probe, never the
+            # protected broker state; it is still excluded from pipe DACL.
+            & icacls $clientDir /grant "*$($foreignSid):(RX)" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Foreign probe directory ACL refused' }
+            $xml=Join-Path $clientDir 'windows.xml'
+            $bat=Join-Path $clientDir 'client-test.cmd'
+            $testPath='se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py::'
+            $ids=@('test_s1a_windows_native_scm_sid_impersonated_token_transport_denies_effects','test_s1a_windows_native_stale_epoch_and_no_service_fallback','test_s1a_windows_native_stalled_peer_read_deadline_recovers','test_s1a_windows_native_hard_crash_restart_rejects_old_epoch')
+            $nodes=($ids | ForEach-Object { $testPath+$_ }) -join ' '
+            # Diagnostics run only AFTER an actual mandatory native pytest RED,
+            # under the SAME genuine unprivileged OS principal. Never a PASS oracle.
+            $probePath=Join-Path $clientDir 'win32-error-probe.py'
+            $probeResult=Join-Path $clientDir 'win32-error-probe.txt'
+            @(
+              'import sys'
+              'from se.src.runtimes.capability.native_broker_ipc_windows_s1a import client_request'
+              'from se.src.runtimes.capability.native_privileged_broker_s1a import new_request'
+              'try:'
+              '    client_request(sys.argv[1], new_request(broker_epoch=""))'
+              'except Exception as exc:'
+              '    t = exc.__traceback__'
+              '    while t is not None:'
+              '        f = t.tb_frame'
+              '        if f.f_code.co_name == "_overlapped":'
+              '            print("S1A_WIN32_ERROR=" + str(f.f_locals.get("error", "UNKNOWN")))'
+              '        t = t.tb_next'
+              '    print("S1A_WIN32_EXCEPTION=" + type(exc).__name__)'
+              'else:'
+              '    print("S1A_DIAGNOSTIC_REQUEST_COMPLETED")'
+            ) | Set-Content -Encoding ascii -Path $probePath
+            $cmdLines=New-Object 'System.Collections.Generic.List[string]'
+            $cmdLines.Add('@echo off')
+            $cmdLines.Add(('set "PYTHONPATH={0}"' -f $env:GITHUB_WORKSPACE))
+            $cmdLines.Add('set "SBX3_S1A_NATIVE_REQUIRED=1"')
+            $cmdLines.Add(('set "SBX3_S1A_TEST_PIPE={0}"' -f $pipe))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_SERVICE={0}"' -f $svc))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_SERVICE_SID={0}"' -f $serviceSid))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_CLIENT_SID={0}"' -f $clientSid))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_PREVIOUS_EPOCH={0}"' -f $oldEpoch))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_PREVIOUS_SERVICE_PID={0}"' -f $oldPid))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_STATE_DIR={0}"' -f $state))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_CONFIG={0}"' -f $cfg))
+            $cmdLines.Add(('set "SBX3_S1A_TEST_DB={0}"' -f $db))
+            $cmdLines.Add(('cd /d "{0}"' -f $env:GITHUB_WORKSPACE))
+            $cmdLines.Add(('"{0}" -m pytest -q -ra --junitxml "{1}" {2}' -f $py,$xml,$nodes))
+            $cmdLines.Add('set "S1A_PYTEST_EXIT=%ERRORLEVEL%"')
+            $cmdLines.Add(('if not "%S1A_PYTEST_EXIT%"=="0" "{0}" "{1}" "{2}" > "{3}" 2>&1' -f $py,$probePath,$pipe,$probeResult))
+            $cmdLines.Add('exit /b %S1A_PYTEST_EXIT%')
+            $cmdLines | Set-Content -Encoding ascii -Path $bat
+            # Verify cmd.exe receives exactly the expected line inventory;
+            # no PowerShell array "+" expression may leak a bare path/epoch as a command.
+            $cmdActual=@(Get-Content -Path $bat)
+            if ($cmdActual.Count -ne 17 -or $cmdActual[13] -notmatch ' -m pytest ' -or $cmdActual[16] -ne 'exit /b %S1A_PYTEST_EXIT%') {
+              throw "Invalid test-client cmd line inventory: $($cmdActual.Count)"
+            }
+            & icacls $bat /inheritance:r /grant:r "*$($clientSid):R" '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Client cmd ACL refused' }
+            $p=Start-Process -FilePath $env:ComSpec -ArgumentList @('/d','/c',$bat) -Credential $credential -WorkingDirectory $env:GITHUB_WORKSPACE -PassThru -RedirectStandardOutput (Join-Path $clientDir 'client-out.txt') -RedirectStandardError (Join-Path $clientDir 'client-err.txt')
+            if (-not $p.WaitForExit(120000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              Get-Content -Path (Join-Path $clientDir 'client-out.txt') -Tail 40 -ErrorAction SilentlyContinue
+              Get-Content -Path (Join-Path $clientDir 'client-err.txt') -Tail 40 -ErrorAction SilentlyContinue
+              Get-Content -Path $probeResult -Tail 20 -ErrorAction SilentlyContinue
+              throw 'Real unprivileged Windows native test process TIMEOUT (>120s): hard RED'
+            }
+            $p.Refresh()
+            if ($p.ExitCode -ne 0) {
+              Get-Content -Path (Join-Path $clientDir 'client-out.txt') -Tail 30 -ErrorAction SilentlyContinue
+              Get-Content -Path (Join-Path $clientDir 'client-err.txt') -Tail 30 -ErrorAction SilentlyContinue
+              Get-Content -Path $probeResult -Tail 20 -ErrorAction SilentlyContinue
+              throw "Real low-privilege client tests RED: $($p.ExitCode)"
+            }
+            Copy-Item -Path (Join-Path $clientDir 'client-out.txt'),(Join-Path $clientDir 'client-err.txt'),$xml -Destination $ev -ErrorAction Stop
+            $xmlValidator = 'import sys,xml.etree.ElementTree as E;cases=list(E.parse(sys.argv[1]).getroot().iter("testcase"));assert len(cases)==4,"Windows native inventory must be 4";assert not any(c.find(x) is not None for c in cases for x in ("skipped","failure","error")),"Native Windows skip/xfail forbidden";print("WINDOWS_NATIVE=4_PASS_0_SKIP")'
+            & $py -c $xmlValidator $xml
+            if ($LASTEXITCODE -ne 0) { throw 'Windows JUnit strict gate failed' }
+            # Native P1 remainder: real FOREIGN Windows SID and LOWERED
+            # low-integrity process, not static SDDL or mocked Windows tokens.
+            # Script is CI-only; Python source/test scope remains owned by #164.
+            $securityProbe=Join-Path $clientDir 'os-security-negative.py'
+            @'
+          import ctypes
+          import subprocess
+          import sys
+          from ctypes import wintypes as w
+          pipe, mode, expected_sid, repo = sys.argv[1:]
+          sys.path.insert(0, repo)
+          from se.src.runtimes.capability.native_broker_ipc_windows_s1a import client_request
+          from se.src.runtimes.capability.native_privileged_broker_s1a import new_request, S1AProtocolError
+          who = subprocess.check_output(["whoami", "/user"], text=True)
+          if expected_sid.casefold() not in who.casefold():
+              raise AssertionError("probe was not launched under the expected OS SID")
+          if mode not in ("foreign", "low"):
+              raise AssertionError("unknown native negative probe mode")
+          if mode == "low":
+              adv = ctypes.WinDLL("advapi32", use_last_error=True)
+              ker = ctypes.WinDLL("kernel32", use_last_error=True)
+              TOKEN_QUERY, TOKEN_ADJUST_DEFAULT, TokenIntegrityLevel = 0x8, 0x80, 25
+              class SID_AND_ATTRIBUTES(ctypes.Structure):
+                  _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", w.DWORD)]
+              class TOKEN_MANDATORY_LABEL(ctypes.Structure):
+                  _fields_ = [("Label", SID_AND_ATTRIBUTES)]
+              ker.GetCurrentProcess.restype = ctypes.c_void_p
+              ker.CloseHandle.argtypes = [ctypes.c_void_p]
+              ker.CloseHandle.restype = w.BOOL
+              ker.LocalFree.argtypes = [ctypes.c_void_p]
+              adv.OpenProcessToken.argtypes = [ctypes.c_void_p, w.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+              adv.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD)]
+              adv.SetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, w.DWORD]
+              adv.ConvertStringSidToSidW.argtypes = [w.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+              adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+              adv.GetLengthSid.argtypes = [ctypes.c_void_p]
+              adv.GetLengthSid.restype = w.DWORD
+              token = ctypes.c_void_p()
+              low_sid = ctypes.c_void_p()
+              if not adv.OpenProcessToken(ker.GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, ctypes.byref(token)):
+                  raise OSError(ctypes.get_last_error(), "OpenProcessToken")
+              try:
+                  if not adv.ConvertStringSidToSidW("S-1-16-4096", ctypes.byref(low_sid)):
+                      raise OSError(ctypes.get_last_error(), "ConvertStringSidToSid")
+                  tml = TOKEN_MANDATORY_LABEL(SID_AND_ATTRIBUTES(low_sid, 0x20))
+                  length = ctypes.sizeof(tml) + adv.GetLengthSid(low_sid)
+                  if not adv.SetTokenInformation(token, TokenIntegrityLevel, ctypes.byref(tml), length):
+                      raise OSError(ctypes.get_last_error(), "SetTokenInformation(low)")
+                  needed = w.DWORD()
+                  adv.GetTokenInformation(token, TokenIntegrityLevel, None, 0, ctypes.byref(needed))
+                  buf = ctypes.create_string_buffer(needed.value)
+                  if not adv.GetTokenInformation(token, TokenIntegrityLevel, buf, needed, ctypes.byref(needed)):
+                      raise OSError(ctypes.get_last_error(), "GetTokenInformation(low)")
+                  current_sid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+                  as_string = ctypes.c_void_p()
+                  if not adv.ConvertSidToStringSidW(current_sid, ctypes.byref(as_string)):
+                      raise OSError(ctypes.get_last_error(), "Low SID stringify")
+                  try:
+                      actual = ctypes.wstring_at(as_string)
+                  finally:
+                      ker.LocalFree(as_string)
+                  if actual != "S-1-16-4096":
+                      raise AssertionError("actual kernel token is not low-integrity: " + actual)
+                  print("WINDOWS_LOW_IL_TOKEN=ATTESTED", flush=True)
+              finally:
+                  if low_sid.value:
+                      ker.LocalFree(low_sid)
+                  if token.value:
+                      ker.CloseHandle(token)
+          # Need only deny an unauthorized OS principal, never an exception-shaped
+          # positive assertion. An ACL/MAC failure or a service DENY with peer=False
+          # is acceptable, but a client-authorized response is a HARD RED.
+          try:
+              result = client_request(pipe, new_request("PING", broker_epoch=""))
+          except S1AProtocolError as exc:
+              print("WINDOWS_" + mode.upper() + "_PIPE_DENY=PASS acl_or_mac", flush=True)
+          else:
+              if result.get("status") != "DENY" or result.get("peer_authenticated") is not False:
+                  raise AssertionError("unauthorized principal was accepted by broker")
+              print("WINDOWS_" + mode.upper() + "_PIPE_DENY=PASS broker_token", flush=True)
+          '@ | Set-Content -Encoding ascii -Path $securityProbe
+            & icacls $securityProbe /inheritance:r /grant:r "*$($clientSid):R" "*$($foreignSid):R" '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Negative probe ACL refused' }
+            foreach ($which in @('foreign','low')) {
+              if ((& sc.exe queryex $svc | Out-String) -notmatch 'RUNNING') { throw 'Native SCM service unavailable before adversarial probe' }
+              $probeSid=if ($which -eq 'foreign') { $foreignSid } else { $clientSid }
+              $probeCred=if ($which -eq 'foreign') { $foreignCredential } else { $credential }
+              $outFile=Join-Path $clientDir "$which-out.txt"
+              $errFile=Join-Path $clientDir "$which-err.txt"
+              $argsLine=('/d /c ""{0}" "{1}" "{2}" "{3}" "{4}" "{5}""' -f $py,$securityProbe,$pipe,$which,$probeSid,$env:GITHUB_WORKSPACE)
+              # Use the real OS account, not runas /trustlevel or a fake SID.
+              $q=Start-Process -FilePath $env:ComSpec -ArgumentList $argsLine -Credential $probeCred -WorkingDirectory $env:GITHUB_WORKSPACE -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+              if (-not $q.WaitForExit(30000)) {
+                Stop-Process -Id $q.Id -Force -ErrorAction SilentlyContinue
+                throw "Actual Windows $which negative probe timed out"
+              }
+              $q.Refresh()
+              $contents=(Get-Content $outFile -Raw -ErrorAction SilentlyContinue)
+              if ($q.ExitCode -ne 0 -or $contents -notmatch "WINDOWS_$($which.ToUpper())_PIPE_DENY=PASS") {
+                Get-Content $outFile,$errFile -ErrorAction SilentlyContinue | Select-Object -Last 40
+                throw "Actual Windows $which native principal negative gate RED"
+              }
+              if ($which -eq 'low' -and $contents -notmatch 'WINDOWS_LOW_IL_TOKEN=ATTESTED') {
+                throw 'Real low token not attested'
+              }
+              Write-Output $contents
+              Copy-Item -Path $outFile,$errFile -Destination $ev -ErrorAction Stop
+            }
+
+            @{old_pid=$oldPid;new_pid=$newPid;service_sid=$serviceSid;client_sid=$clientSid;effect='DENY';source='ba36bd12bc3d903c6a5cb0d0497c28a0dc541a33'} | ConvertTo-Json | Set-Content -Path (Join-Path $ev 'windows-identity.json')
+          }
+          finally {
+            if ($clientDir -and (Test-Path $clientDir)) {
+              Copy-Item -Path (Join-Path $clientDir 'client-out.txt'),(Join-Path $clientDir 'client-err.txt'),(Join-Path $clientDir 'windows.xml'),$probeResult -Destination $ev -ErrorAction SilentlyContinue
+            }
+            & sc.exe stop $svc | Out-Null
+            & sc.exe delete $svc | Out-Null
+            if (Get-LocalUser -Name $client -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $client }
+            if (Get-LocalUser -Name $foreign -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $foreign }
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbx3-s1a-windows-proof
+          path: ${{ runner.temp }}/s1a-proof
+          if-no-files-found: ignore
