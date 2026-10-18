@@ -57,3 +57,28 @@ def test_d2_restarted_manager_cannot_delete_orphaned_native_root(tmp_path):
     with pytest.raises(NativeTreeUnverifiedError):
         restarted._remove_root(lease.root)
     assert lease.root.exists(), "unsafe cleanup removed an OS-unverified root"
+
+
+@pytest.mark.parametrize("name", (
+    "terminal.run", "terminal.launch", "python.run",
+    "plugin.terminal.run", "plugin.terminal.launch", "plugin.python.run",
+))
+def test_d2_agent_origin_process_request_denied_before_runtime_driver_lookup(name):
+    """Agent taint can only deny; an absent registry may not hide Native HOLD."""
+    import asyncio
+    from se.src.domain.schemas.identity import Identity
+    from se.src.runtimes.capability.runtime import CapabilityRuntime
+    from se.src.runtimes.capability.contracts.error import CapabilityError
+
+    async def run():
+        return await CapabilityRuntime().execute_capability(
+            capability_id=name,
+            arguments={"command": "NEVER_EXECUTE"},
+            identity=Identity(user_id="d2-owner", auth_type="jwt"),
+            execution_id="d2-agent",
+            caller_agent_execution_id="d2-agent",
+        )
+
+    with pytest.raises(CapabilityError) as observed:
+        asyncio.run(run())
+    assert observed.value.code == "SBX3_NATIVE_RECEIPT_UNAVAILABLE"
