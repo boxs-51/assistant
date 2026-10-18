@@ -9,6 +9,7 @@ from .workspace import WorkspaceManager
 from .session import SessionManager
 from .hitl import HitlManager
 from .encoder import FileEncoder
+from ..core.gateway_client import GatewayEffectOutcomeUnknown
 from ..schemas.message import GatewayMessage
 from ..schemas.request import GatewayChatRequest, RequestConfig
 from ..schemas.agent_execution import AgentExecutionLimits
@@ -73,6 +74,10 @@ class UIBridge:
         self._window = None
         self._execution_local = threading.local()
         self._state_lock = threading.RLock()
+        # Serializes authenticated principal replacement with direct UI
+        # effect handoff, never with the human approval wait itself.
+        self._auth_transition_lock = threading.RLock()
+        self._auth_transition_in_progress = False
         self._activity = []
         self._auth_generation = 0
         self._chat_preferences = {
@@ -89,25 +94,16 @@ class UIBridge:
         self.sessions = SessionManager()
         
         timeout = getattr(engine, "approval_timeout_seconds", 300.0)
-        self.hitl = HitlManager(self._eval_js, self._execution_local, timeout)
+        self.hitl = HitlManager(
+            self._eval_js, self._execution_local, timeout,
+            require_origin_pin=True,
+        )
         self.encoder = FileEncoder(self._eval_js)
         
         hitl.set_approval_callback(self.hitl.show_dialog)
 
     def login(self, payload: dict):
-        try:
-            data = self._client_runtime.login(payload)
-            self._notify_identity_changed(authenticated=True)
-            return {
-                "success": True,
-                "data": data,
-            }
-        except Exception as error:
-            logger.exception("Login failed")
-            return {
-                "success": False,
-                "error": str(error),
-            }
+        return self._identity_action(self._client_runtime.login, payload, True)
 
     def _auth_action(self, action, payload: dict):
         try:
@@ -120,7 +116,10 @@ class UIBridge:
         return self._auth_action(self._client_runtime.register, payload)
 
     def verify_registration(self, payload: dict):
-        return self._auth_action(self._client_runtime.verify_registration, payload)
+        # Verification activates an authenticated principal just like login.
+        return self._identity_action(
+            self._client_runtime.verify_registration, payload, True,
+        )
 
     def initiate_password_reset(self, payload: dict):
         return self._auth_action(self._client_runtime.initiate_password_reset, payload)
@@ -129,10 +128,9 @@ class UIBridge:
         return self._auth_action(self._client_runtime.confirm_password_reset, payload)
 
     def logout(self):
-        result = self._auth_action(lambda _payload: self._client_runtime.logout(), {})
-        if result.get("success"):
-            self._notify_identity_changed(authenticated=False)
-        return result
+        return self._identity_action(
+            lambda _payload: self._client_runtime.logout(), {}, False,
+        )
 
     def _record_activity(self, action: str, status: str, detail=None):
         item = {
@@ -294,6 +292,19 @@ class UIBridge:
         tool_arguments = tool_arguments or {}
         if not isinstance(tool_arguments, dict):
             return {"success": False, "error": "Tool arguments phải là object."}
+        with self._state_lock:
+            if self._auth_transition_in_progress:
+                return {
+                    "success": False,
+                    "error": "Authentication transition in progress.",
+                }
+            # An already-pinned invocation cannot be silently rebound.
+            prior_generation = getattr(self._execution_local, "auth_generation", None)
+            origin_generation = (
+                self._auth_generation if prior_generation is None
+                else prior_generation
+            )
+            self._execution_local.auth_generation = origin_generation
         try:
             local = self._engine.registry.get_tool(tool_name)
             metadata = local.get("metadata", {}) if isinstance(local, dict) else {}
@@ -306,15 +317,41 @@ class UIBridge:
             )
             if not approved:
                 raise PermissionError("Tool execution was not approved.")
-            result = self._engine.gateway_client.execute_capability(
-                tool_name,
-                {"arguments": tool_arguments},
-            )
+            with self._auth_transition_lock:
+                with self._state_lock:
+                    if origin_generation != self._auth_generation:
+                        raise PermissionError("Approval belongs to an old identity.")
+                # Keep the auth transition out of the approval-to-effect gap.
+                # Do not hold this lock while waiting for human consent.
+                result = self._engine.gateway_client.execute_capability(
+                    tool_name, {"arguments": tool_arguments},
+                )
             self._record_activity("tool.execute", "success", tool_name)
             return {"success": True, "data": result}
+        except GatewayEffectOutcomeUnknown:
+            # Network ambiguity is never an explicit server-side DENY.
+            # No automatic retries; definitive dedupe needs #359 authority.
+            self._record_activity(
+                "tool.execute", "outcome_unknown", tool_name,
+            )
+            return {
+                "success": False,
+                "status": "OUTCOME_UNKNOWN",
+                "retryable": False,
+                "error": (
+                    "The gateway response was lost or timed out; the effect "
+                    "may have occurred. Do not retry automatically."
+                ),
+            }
         except Exception as error:
             self._record_activity("tool.execute", "error", str(error))
             return {"success": False, "error": str(error)}
+        finally:
+            if prior_generation is None:
+                if hasattr(self._execution_local, "auth_generation"):
+                    del self._execution_local.auth_generation
+            else:
+                self._execution_local.auth_generation = prior_generation
 
     def save_agent(self, payload: dict):
         try:
@@ -378,11 +415,41 @@ class UIBridge:
             logger.warning("Lỗi JS: %s", error)
             return False
 
-    def _notify_identity_changed(self, authenticated: bool):
+    def _revoke_identity_generation(self) -> None:
         with self._state_lock:
+            # Reject old approvals *before* the runtime mutates principal.
+            self.hitl.invalidate_pending()
             self._auth_generation += 1
-            generation = self._auth_generation
             self.sessions = SessionManager()
+
+    def _identity_action(self, action, payload: dict, authenticated: bool):
+        with self._auth_transition_lock:
+            with self._state_lock:
+                self._auth_transition_in_progress = True
+            try:
+                # Even an auth API exception may occur after runtime changed.
+                # Revoke before issuing it; deny UI tools during transition.
+                self._revoke_identity_generation()
+                result = self._auth_action(action, payload)
+                effective_auth = (
+                    authenticated if result.get("success") else
+                    bool(getattr(self._client_runtime, "owner_id", None))
+                )
+                self._publish_identity_changed(effective_auth)
+                return result
+            finally:
+                with self._state_lock:
+                    self._auth_transition_in_progress = False
+
+    def _notify_identity_changed(self, authenticated: bool):
+        # Compatibility helper for callers not performing a runtime transition.
+        with self._auth_transition_lock:
+            self._revoke_identity_generation()
+            self._publish_identity_changed(authenticated)
+
+    def _publish_identity_changed(self, authenticated: bool):
+        with self._state_lock:
+            generation = self._auth_generation
         payload = {
             "generation": generation,
             "authenticated": bool(authenticated),
@@ -660,6 +727,9 @@ class UIBridge:
 
                 execution_started = True
                 self._execution_local.execution_id = execution_id
+                # Bind a prompt to the authenticated generation that started
+                # this work, not whichever account happens to own the UI later.
+                self._execution_local.auth_generation = auth_generation
                 self._emit_conversation_execution_state(
                     cid,
                     execution_id,
@@ -739,6 +809,8 @@ class UIBridge:
             except Exception as e:
                 _scoped_render(role="system", text=f"❌ Lỗi: {str(e)}")
             finally:
+                if hasattr(self._execution_local, "auth_generation"):
+                    del self._execution_local.auth_generation
                 if execution_started:
                     _scoped_render(role="assistant", btype="stream_end")
                     self._emit_conversation_execution_state(

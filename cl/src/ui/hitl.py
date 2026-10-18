@@ -7,12 +7,16 @@ logger = logging.getLogger(__name__)
 
 
 class HitlManager:
-    def __init__(self, eval_js_cb, execution_local, timeout=300.0):
+    def __init__(self, eval_js_cb, execution_local, timeout=300.0, *, require_origin_pin=False):
         self._eval_js = eval_js_cb
         self._execution_local = execution_local
         self._approval_lock = threading.RLock()
         self._approval_ui_lock = threading.Lock()
         self._pending_approvals = {}
+        self._auth_generation = 0
+        # Production UIBridge opts in; callbacks with no trusted invocation
+        # generation cannot claim the current principal's approval authority.
+        self._require_origin_pin = require_origin_pin
         self._timeout = timeout
 
     @staticmethod
@@ -21,6 +25,19 @@ class HitlManager:
             return choice.strip().lower() in {"1", "true", "yes", "approve"}
         return bool(choice)
 
+    def invalidate_pending(self) -> None:
+        """Reject in-flight approvals across a UI login/logout boundary.
+
+        This is an in-memory safety fence, not durable user consent. Existing
+        waiters are woken and cannot turn a late response into authorization.
+        """
+        with self._approval_lock:
+            self._auth_generation += 1
+            for pending in self._pending_approvals.values():
+                pending["resolved"] = True
+                pending["response"] = False
+                pending["event"].set()
+
     def respond(self, choice: bool, approval_id: str = None):
         selected_id = approval_id.strip() if isinstance(approval_id, str) else approval_id
         if not selected_id:
@@ -28,7 +45,8 @@ class HitlManager:
 
         with self._approval_lock:
             pending = self._pending_approvals.get(selected_id)
-            if not pending or pending["resolved"]:
+            if (not pending or pending["resolved"]
+                    or pending["auth_generation"] != self._auth_generation):
                 return False
 
             pending["resolved"] = True
@@ -46,6 +64,18 @@ class HitlManager:
         request["approval_id"] = approval_id
 
         execution_id = getattr(self._execution_local, "execution_id", None)
+        execution_generation = getattr(self._execution_local, "auth_generation", None)
+        with self._approval_lock:
+            if self._require_origin_pin and (
+                not isinstance(execution_generation, int)
+                or isinstance(execution_generation, bool)
+            ):
+                logger.warning("HITL missing trusted invocation generation; denying")
+                return False
+            request_generation = (
+                self._auth_generation
+                if execution_generation is None else execution_generation
+            )
         if execution_id:
             request["execution_id"] = execution_id
 
@@ -56,9 +86,13 @@ class HitlManager:
                 "response": None,
                 "resolved": False,
                 "execution_id": execution_id,
+                "auth_generation": request_generation,
             }
-
             with self._approval_lock:
+                # Registration and generation check must be atomic: an
+                # identity switch may occur while this UI surface is queued.
+                if request_generation != self._auth_generation:
+                    return False
                 self._pending_approvals[approval_id] = pending
 
             displayed_id = self._eval_js(
@@ -66,9 +100,24 @@ class HitlManager:
                 + json.dumps(request, ensure_ascii=False)
                 + ")"
             )
-            if displayed_id != approval_id:
+            with self._approval_lock:
+                invalidated = request_generation != self._auth_generation
+            if displayed_id != approval_id or invalidated:
                 with self._approval_lock:
                     self._pending_approvals.pop(approval_id, None)
+                # An identity switch can race a delayed WebView show ACK.
+                # If our token was actually displayed, hide exactly that
+                # token rather than leaving a stale approval on the new UI.
+                if invalidated and displayed_id == approval_id:
+                    hidden = self._eval_js(
+                        "window.hideApprovalBar && window.hideApprovalBar("
+                        + json.dumps(approval_id)
+                        + ")"
+                    )
+                    if hidden is not True:
+                        logger.warning(
+                            "HITL stale approval hide failed: %s", approval_id
+                        )
                 logger.warning(
                     "HITL approval UI display acknowledgement mismatch; "
                     "failing closed: expected=%s actual=%r",
@@ -80,7 +129,11 @@ class HitlManager:
             completed = event.wait(timeout=self._timeout)
 
             with self._approval_lock:
-                response = pending.get("response") if completed else False
+                response = (
+                    pending.get("response")
+                    if completed and request_generation == self._auth_generation
+                    else False
+                )
                 self._pending_approvals.pop(approval_id, None)
 
             hidden = self._eval_js(
@@ -94,4 +147,9 @@ class HitlManager:
                     approval_id,
                 )
 
-            return bool(response)
+            # The WebView hide callback can block while auth changes after
+            # the response was consumed. Refuse a cached approval on return.
+            with self._approval_lock:
+                if request_generation != self._auth_generation:
+                    return False
+                return bool(response)

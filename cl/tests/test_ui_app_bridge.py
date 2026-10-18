@@ -1,8 +1,11 @@
 import inspect
+import json
+import re
 import threading
 import time
 
 from cl.src.ui.bridge import UIBridge
+from cl.src.core.gateway_client import GatewayEffectOutcomeUnknown
 
 
 class _Hitl:
@@ -438,3 +441,228 @@ def test_submit_prompt_passes_configured_agent_time_budgets(monkeypatch):
     request = bridge._client_runtime.chat_calls[0]
     assert request.agent_limits.timeout_seconds == 600
     assert request.agent_limits.tool_timeout_seconds == 330
+
+
+def test_identity_switch_revokes_pending_hitl_before_notifying_webview():
+    bridge, _, _ = _bridge()
+    notifications = []
+    revocations = []
+    bridge.hitl.invalidate_pending = lambda: revocations.append(bridge._auth_generation)
+    bridge._eval_js = lambda script: notifications.append((script, len(revocations)))
+
+    assert bridge.login({"email": "next@example.com"})["success"] is True
+    assert bridge._auth_generation == 1
+    assert revocations == [0]  # revoke before auth generation becomes 1
+    assert notifications and notifications[-1][1] == 1
+
+    bridge._client_runtime.logout = lambda: None
+    assert bridge.logout()["success"] is True
+    assert bridge._auth_generation == 2
+    assert revocations == [0, 1]
+    assert notifications[-1][1] == 2
+
+
+class _BlockingApprovalWindow:
+    def __init__(self):
+        self.shown = threading.Event()
+        self.request = None
+        self.hidden = []
+
+    def evaluate_js(self, source):
+        show = re.search(r"showApprovalBar\((.*)\)$", source)
+        hide = re.search(r"hideApprovalBar\((.*)\)$", source)
+        if show:
+            self.request = json.loads(show.group(1))
+            self.shown.set()
+            return self.request["approval_id"]
+        if hide:
+            self.hidden.append(json.loads(hide.group(1)))
+            return True
+        return True
+
+
+def test_verify_registration_revokes_old_visible_approval():
+    bridge, _, _ = _bridge()
+    bridge.hitl._timeout = 1.0
+    window = _BlockingApprovalWindow()
+    bridge.set_window(window)
+    result = []
+    # This request represents already-authenticated work that captured
+    # generation zero when it was created.
+    def run_old():
+        bridge._execution_local.auth_generation = 0
+        result.append(bridge.hitl.show_dialog({"name": "old account"}))
+    worker = threading.Thread(target=run_old, daemon=True)
+    worker.start()
+    assert window.shown.wait(1.0)
+    old_id = window.request["approval_id"]
+
+    assert bridge.verify_registration({"otp": "123456"})["success"] is True
+    assert bridge._auth_generation == 1
+    assert bridge.respond_approval(True, old_id) is False
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert result == [False]
+
+
+def test_partial_failed_verification_revokes_approval_even_if_runtime_raises():
+    bridge, _, _ = _bridge()
+    bridge.hitl._timeout = 1.0
+    window = _BlockingApprovalWindow()
+    bridge.set_window(window)
+    result = []
+
+    def run_old():
+        bridge._execution_local.auth_generation = 0
+        result.append(bridge.hitl.show_dialog({"name": "old account"}))
+    worker = threading.Thread(target=run_old, daemon=True)
+    worker.start()
+    assert window.shown.wait(1.0)
+    old_id = window.request["approval_id"]
+
+    def partially_changed(_payload):
+        bridge._client_runtime.owner_id = "partially-changed"
+        raise RuntimeError("auth API failed after runtime changed")
+
+    bridge._client_runtime.verify_registration = partially_changed
+    assert bridge.verify_registration({"otp": "123456"})["success"] is False
+    assert bridge.respond_approval(True, old_id) is False
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert result == [False]
+
+
+def test_direct_tool_approval_cannot_authorize_after_identity_switch():
+    bridge, _, gateway = _bridge()
+    executions = []
+    gateway.execute_capability = lambda *args, **kwargs: executions.append(args)
+    # Mimic the switch after HITL returned approval but before the target.
+    bridge._engine.hitl.request_approval = lambda *args: (
+        bridge._revoke_identity_generation() or True
+    )
+    outcome = bridge.execute_tool("echo", {"text": "old session"})
+    assert outcome["success"] is False
+    assert "old identity" in outcome["error"]
+    assert executions == []
+
+
+def test_production_ui_rejects_callback_without_origin_pin():
+    bridge, _, _ = _bridge()
+    assert bridge.hitl.show_dialog({"name": "unpinned capability"}) is False
+
+
+def test_direct_ui_tool_pins_generation_and_can_execute_after_current_approval():
+    bridge, _, _ = _bridge()
+    bridge.hitl._timeout = 1.0
+    bridge._engine.hitl.request_approval = (
+        lambda name, args, risk, reason: bridge._engine.hitl.callback({
+            "name": name, "args": args,
+            "risk_level": risk, "reason": reason,
+        })
+    )
+    window = _BlockingApprovalWindow()
+    bridge.set_window(window)
+    outcomes = []
+    worker = threading.Thread(
+        target=lambda: outcomes.append(bridge.execute_tool("echo", {"text": "ok"})),
+        daemon=True,
+    )
+    worker.start()
+    assert window.shown.wait(1.0)
+    assert bridge.respond_approval(True, window.request["approval_id"]) is True
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert outcomes[0]["success"] is True
+    assert outcomes[0]["data"]["output"] == {"text": "ok"}
+
+
+def test_direct_ui_tool_denied_while_auth_transition_is_in_flight():
+    bridge, _, gateway = _bridge()
+    entered, resume = threading.Event(), threading.Event()
+    executed = []
+    gateway.execute_capability = lambda *args, **kwargs: executed.append(args)
+
+    def delayed_verification(_payload):
+        entered.set()
+        assert resume.wait(2.0)
+        return {"user": {"id": "new-owner"}}
+
+    bridge._client_runtime.verify_registration = delayed_verification
+    changes = []
+    worker = threading.Thread(
+        target=lambda: changes.append(bridge.verify_registration({"otp": "ok"})),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(1.0)
+    denied = bridge.execute_tool("echo", {"text": "from old UI"})
+    assert denied["success"] is False
+    assert "transition in progress" in denied["error"]
+    assert executed == []
+    resume.set()
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert changes[0]["success"] is True
+
+
+def test_direct_tool_gateway_unknown_is_not_success_or_retryable():
+    bridge, _, gateway = _bridge()
+    attempts = []
+
+    def ambiguous(*args, **kwargs):
+        attempts.append((args, kwargs))
+        raise GatewayEffectOutcomeUnknown("gateway timed out")
+
+    gateway.execute_capability = ambiguous
+    result = bridge.execute_tool("echo", {"text": "one-shot"})
+    assert result["success"] is False
+    assert result["status"] == "OUTCOME_UNKNOWN"
+    assert result["retryable"] is False
+    assert "may have occurred" in result["error"]
+    assert len(attempts) == 1
+
+
+def test_concurrent_logout_stays_fenced_until_effect_exits_unknown():
+    bridge, _, gateway = _bridge()
+    entered = threading.Event()
+    release = threading.Event()
+    outcomes = []
+    transitions = []
+    attempts = []
+
+    def blocked_effect(*args):
+        attempts.append(args)
+        entered.set()
+        assert release.wait(2.0)
+        raise GatewayEffectOutcomeUnknown("read timeout")
+
+    gateway.execute_capability = blocked_effect
+    tool = threading.Thread(
+        target=lambda: outcomes.append(bridge.execute_tool("echo", {"x": 1})),
+        daemon=True,
+    )
+    tool.start()
+    assert entered.wait(1.0)
+
+    bridge._client_runtime.logout = lambda: transitions.append("runtime-logout")
+    logout = threading.Thread(
+        target=lambda: transitions.append(bridge.logout()), daemon=True,
+    )
+    logout.start()
+    # The old effect holds the authorization lock; logout must NOT mutate
+    # runtime principal before the pending result is known/unknown.
+    logout.join(0.05)
+    assert logout.is_alive()
+    assert transitions == []
+
+    release.set()
+    tool.join(2.0)
+    logout.join(2.0)
+    assert not tool.is_alive()
+    assert not logout.is_alive()
+    assert len(attempts) == 1
+    assert outcomes[0]["status"] == "OUTCOME_UNKNOWN"
+    assert outcomes[0]["retryable"] is False
+    assert transitions[0] == "runtime-logout"
+    assert transitions[1]["success"] is True
+    assert bridge._auth_generation == 1
