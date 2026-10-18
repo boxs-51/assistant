@@ -1,0 +1,60 @@
+name: AE-R14 E-P1B Durable Pending Consent Boundary
+
+on:
+  pull_request:
+    paths:
+      - "cl/src/hitl/durable_pending_consent.py"
+      - "cl/tests/test_durable_hitl_pending_restart.py"
+      - "docs/agent_execution_r14/R14_E_P1B_DURABLE_PENDING_CONSENT_BOUNDARY.md"
+      - ".github/workflows/ae-r14-e-p1b-durable-pending.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pending-consent-os-hard-exit:
+    name: Durable HITL pending OS-exit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Create durable evidence directory
+        run: python -c "from pathlib import Path; Path('evidence/p1b').mkdir(parents=True,exist_ok=True)"
+      - name: Real OS subprocess crash and persistent pending consent negatives
+        run: >-
+          python -m pytest -q -ra
+          --basetemp=evidence/p1b/crash
+          --junitxml=evidence/p1b/junit.xml
+          cl/tests/test_durable_hitl_pending_restart.py
+      - name: Strict JUnit no skips or xfail
+        run: >-
+          python -c "import xml.etree.ElementTree as ET;
+          root=ET.parse('evidence/p1b/junit.xml').getroot();
+          suites=[root] if root.tag=='testsuite' else root.findall('testsuite');
+          assert suites, 'No test suites';
+          checks={k:sum(int(s.attrib.get(k,'0')) for s in suites)
+          for k in ('tests','failures','errors','skipped')};
+          print(checks);
+          assert checks['tests']>=7 and all(checks[k]==0
+          for k in ('failures','errors','skipped')), 'P1B no-skip gate failed'"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ae-r14-e-p1b-${{ matrix.os }}-evidence
+          path: evidence/p1b
+          if-no-files-found: warn
