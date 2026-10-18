@@ -62,6 +62,30 @@ jobs:
             se/tests/integration/test_ae359_post_ack_loss_physical.py::test_r_ack_07_lost_ack_then_fresh_uninitialized_cache_must_not_issue_sql_otp \
             se/tests/integration/test_ae359_cross_instance_issuance_redfirst.py \
             --junitxml=rack07-cross-instance-junit.xml
+      - name: Strict original and additive R-ACK oracle identity
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          path = Path("rack07-cross-instance-junit.xml")
+          assert path.exists(), "HARNESS_ERROR: physical R-ACK JUnit missing"
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+          cases = [case for suite in suites for case in suite.findall("testcase")]
+          found = Counter(case.attrib["name"].split("[", 1)[0] for case in cases)
+          assert found == Counter({
+              "test_r_ack_07_lost_ack_then_fresh_uninitialized_cache_must_not_issue_sql_otp": 1,
+              "test_r_ack_08_cross_instance_lost_ack_never_issues_second_sql_challenge": 2,
+              "test_r_ack_09_competing_pg17_writers_issue_only_one_redis_challenge": 2,
+          }), ("HARNESS_ERROR: physical R-ACK security oracles missing/duplicated", found)
+          bad = {k: sum(case.find(k) is not None for case in cases)
+                 for k in ("failure", "error", "skipped")}
+          assert len(cases) == 5 and all(value == 0 for value in bad.values()), (
+              "RACK07_SEMANTIC_RED", bad
+          )
+          print("RACK07=5_PASS_0_FAIL_0_ERROR_0_SKIP; REAL_REDIS_PG17")
       - name: Preserve raw physical JUnit even on RED
         if: always()
         uses: actions/upload-artifact@v4
