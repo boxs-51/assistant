@@ -1,0 +1,103 @@
+name: AE359 UTC-Naive PG17 T1 RED-First
+
+# Unfiltered PR trigger: these security jobs must not disappear due to path filters.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  physical-pg17-utc-naive:
+    name: AE359 UTC-naive RED-first PostgreSQL 17 / ubuntu-24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        # Immutable digest and release/prod admission remain HOLD.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ae359_otp_t1
+          POSTGRES_USER: ae359_test
+          # Ephemeral localhost CI only. No password exists to leak in docker create logs.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ae359_test -d ae359_otp_t1"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AE359_TZ_PG17_STRICT: "1"
+      AE359_TZ_PG17_URL: postgresql+asyncpg://ae359_test@127.0.0.1:5432/ae359_otp_t1
+      AE359_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout exact T1 branch HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Verify strict isolated physical PG17 and checked-out candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$AE359_EXPECTED_SHA"
+          printf 'AE359_TZ_EXACT_HEAD=%s\n' "$(git rev-parse HEAD)"
+          python - <<'PY'
+          import os
+          from sqlalchemy.engine import make_url
+          u = make_url(os.environ['AE359_TZ_PG17_URL'])
+          assert (u.drivername, u.host, u.database) == (
+              'postgresql+asyncpg', '127.0.0.1', 'ae359_otp_t1'
+          ) and u.password is None
+          assert os.environ['AE359_TZ_PG17_STRICT'] == '1'
+          print('AE359_TZ_DISPOSABLE_PG17_GUARD=PASS')
+          PY
+          python -m compileall -q se/tests/integration/test_ae359_utc_naive_pg17_redfirst.py
+      - name: Run strict UTC-naive RED-first and audit complete JUnit receipt
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          python -m pytest -q -ra --tb=short \
+            se/tests/integration/test_ae359_utc_naive_pg17_redfirst.py \
+            --junitxml=ae359-utc-naive-pg17.xml
+          pytest_rc=$?
+          set -e
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('ae359-utc-naive-pg17.xml').getroot()
+          suites = [root] if root.tag == 'testsuite' else [
+              s for s in root.iter('testsuite')
+          ]
+          tests = sum(int(s.attrib.get('tests', 0)) for s in suites)
+          skipped = sum(int(s.attrib.get('skipped', 0)) for s in suites)
+          failures = sum(int(s.attrib.get('failures', 0)) for s in suites)
+          errors = sum(int(s.attrib.get('errors', 0)) for s in suites)
+          print(f'AE359_TZ_PG17_RECEIPTS={tests} SKIP={skipped} FAIL={failures} ERROR={errors}')
+          assert tests == 9 and skipped == 0, (
+              f'Incomplete PG17 RED-first receipt: {tests}/9, skip={skipped}'
+          )
+          PY
+          exit "$pytest_rc"
+      - name: Preserve raw PostgreSQL RED-first JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ae359-utc-naive-pg17-linux-raw
+          path: ae359-utc-naive-pg17.xml
+          if-no-files-found: error
+          retention-days: 7
