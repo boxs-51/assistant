@@ -45,13 +45,14 @@ jobs:
               "test_d2_alias_success_never_crosses_native_receipt_gate": 3,
               "test_d2_error_outcomes_remain_reportable": 6,
               "test_d2_restarted_manager_cannot_delete_orphaned_native_root": 1,
+              "test_d2_agent_origin_process_request_denied_before_runtime_driver_lookup": 6,
           }), ("HARNESS_ERROR: missing/duplicate Native D2 security oracle", found)
           bad = {k: sum(case.find(k) is not None for case in cases)
                  for k in ("failure", "error", "skipped")}
-          assert len(cases) == 10 and all(value == 0 for value in bad.values()), (
+          assert len(cases) == 16 and all(value == 0 for value in bad.values()), (
               "NATIVE_D2_SEMANTIC_RED", bad
           )
-          print("NATIVE_D2=10_PASS_0_FAIL_0_ERROR_0_SKIP; PORTABLE_NOT_OS_CONFINEMENT")
+          print("NATIVE_D2=16_PASS_0_FAIL_0_ERROR_0_SKIP; PORTABLE_NOT_OS_CONFINEMENT")
       - name: Preserve raw JUnit on RED and GREEN
         if: always()
         uses: actions/upload-artifact@v4
