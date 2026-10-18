@@ -80,7 +80,15 @@ class PendingRegistrationRepository(BaseRepository):
             (purpose + "\\x00" + email.strip().casefold()).encode("utf-8")
         ).hexdigest()
         fence_key = "otp-issuance-v1-" + digest
-        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Use the database's own advancing UTC clock for PostgreSQL. App
+        # worker clock skew must not retire another worker's live fence.
+        utc_now = (
+            (await self.session.execute(
+                select(func.timezone("UTC", func.clock_timestamp()))
+            )).scalar_one()
+            if dialect == "postgresql"
+            else datetime.now(timezone.utc).replace(tzinfo=None)
+        )
         # Never release the fence concurrently with an unconfirmed Redis
         # command. The longer retention is deliberate fail-closed behavior;
         # no SQL duplicate is admitted while a Redis OTP might still exist.
