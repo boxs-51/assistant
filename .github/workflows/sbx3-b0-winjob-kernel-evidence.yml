@@ -1,0 +1,53 @@
+name: SBX3 B0 Windows Job Kernel Evidence
+
+on:
+  pull_request:
+    paths:
+      - "se/src/runtimes/capability/native_windows_job_b0.py"
+      - "se/tests/architecture/test_sbx3_winjob_b0.py"
+      - ".github/workflows/sbx3-b0-winjob-kernel-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-real-job-kernel-hardcrash:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Strict native Win32 Job Object nested-descendant hard-crash test
+        shell: pwsh
+        run: >-
+          python -m unittest -v
+          se.tests.architecture.test_sbx3_winjob_b0
+      - name: Preserve non-certification markers
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Output "SBX3_WINDOWS_JOB_OBJECT=KERNEL_DIAGNOSTIC_ONLY"
+          Write-Output "SBX3_WINDOWS_OS_JOB_DURABLE_REATTACH=NOT_PROVEN"
+          Write-Output "SBX3_WINDOWS_APPCONTAINER_NETWORK_NONE=NOT_IMPLEMENTED"
+          Write-Output "SBX3_WINDOWS_NATIVE_AGENT_ACTIVATION=DENIED"
+          Write-Output "SBX3_WINDOWS_ROOT_CLEANUP_AUTHORITY=NOT_RELEASED"
+
+  linux-native-windows-backend-failclosed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Reject Windows Job calls before any Linux host native effect
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v se.tests.architecture.test_sbx3_winjob_b0
+      - name: Explicit unsupported platform marker
+        if: always()
+        run: echo "SBX3_LINUX_WINJOB=UNSUPPORTED_DENY_PRESPAWN"
