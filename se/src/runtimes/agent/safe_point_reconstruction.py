@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .native_receipt_verifier import require_native_record
+
 import hashlib
 import json
 from dataclasses import dataclass
@@ -180,6 +182,7 @@ async def _sanitize_transcript_in_uow(
                 "SAFE_POINT_TOOL_RESULT_CONFLICT: committed tool result "
                 "does not match transcript execution/tool identity."
             )
+        require_native_record(result, phase="recovery_transcript_safe_point")
         sanitized.append(_committed_tool_message(result))
 
     try:
@@ -485,6 +488,7 @@ async def reconstruct_r7c_safe_point_in_uow(
                 "commit_state",
                 "PROVISIONAL",
             ) == "COMMITTED":
+                require_native_record(result, phase="recovery_active_batch_safe_point")
                 if (
                     str(result.execution_id) != execution_id
                     or str(result.tool_call_id) != tool_call_id

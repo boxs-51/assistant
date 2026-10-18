@@ -21,6 +21,7 @@ from ..capability.contracts.invocation import (
 from ..connection.contracts import ConnectionNotFoundError
 from ..capability.contracts.reconciliation import RemoteReconciliationStatus
 from ..connection.multiplexer import RemoteConnectionLost
+from .native_receipt_verifier import require_native_record
 from .contracts.inference import InferenceMessage
 from .contracts.resume import (
     CheckpointPendingInvocation,
@@ -399,6 +400,7 @@ class AgentResumePlanningService:
                 execution_id,
                 tool_call_id,
             )
+            require_native_record(committed, phase="resume_active_batch_coverage")
             if committed is None:
                 missing.append(tool_call_id)
         if missing:
@@ -671,6 +673,7 @@ class AgentResumePlanningService:
             execution_id,
             snapshot.tool_call_id,
         )
+        require_native_record(result, phase="resume_REUSE_COMMITTED")
         if result is None:
             raise ResumePlanRejected(
                 "COMMITTED_TOOL_RESULT_MISSING",
