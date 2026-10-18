@@ -127,11 +127,16 @@ def test_r_ack_09_competing_pg17_writers_issue_only_one_redis_challenge(purpose)
             )
             assert sum(r is None for r in results) == 1
             verifier = OTPStorageService(first_driver, _factory(engine))
-            first = await getattr(verifier, verify_name)(email, "111111")
-            second = await getattr(verifier, verify_name)(email, "222222")
-            assert (first is None) != (second is None), (
-                "SEMANTIC_RED: both OTPs authenticated or both were lost"
-            )
+            # A wrong OTP is intentionally one-use: consume the winning code
+            # FIRST, regardless of which concurrent writer won the SQL fence.
+            winner = next(index for index, value in enumerate(results) if value is None)
+            winning_code = ("111111", "222222")[winner]
+            losing_code = ("222222", "111111")[winner]
+            winning_payload = {"value": ("first", "second")[winner]}
+            accepted = await getattr(verifier, verify_name)(email, winning_code)
+            rejected = await getattr(verifier, verify_name)(email, losing_code)
+            assert accepted == winning_payload, "positive issuance control lost"
+            assert rejected is None, "SEMANTIC_RED: losing OTP authenticated"
             assert await _row_count(engine, email) == 0
         finally:
             await first_driver.disconnect()
