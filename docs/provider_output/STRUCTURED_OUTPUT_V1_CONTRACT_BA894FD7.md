@@ -1,3 +1,7 @@
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:START -->
+> **HISTORICAL / NON-NORMATIVE (Human Owner withdrawal, 2026-10-16):** Repository-specific Policy #85 (all versions), its M1–M7 modules and Developer Harness #551 are **RETIRED**. References below calling them active, canonical, currently operative, or governing CLAIM, review, stack depth, Integration Wave, source admission or merge are dated historical statements, **not instructions currently in force**. This notice does not change this document's technical contracts, P0/P1/HOLD, security requirements, test expectations, recorded Owner decisions, audit evidence, or real GitHub protections; it grants no approval, technical PASS, merge or deployment permission.
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:END -->
+
 # SO-C0 — STRUCTURED_OUTPUT_V1 Provider-Neutral Contract Freeze
 
 > **Authority:** Issue [#385](https://github.com/boxs-51/assistant/issues/385), Policy [#85 v2.5](https://github.com/boxs-51/assistant/issues/85), independent PRE-CLAIM **PASS/RELEASED** [#6059934493](https://github.com/boxs-51/assistant/issues/385#issuecomment-6059934493), owner exact-path CLAIM [#6060012926](https://github.com/boxs-51/assistant/issues/385#issuecomment-6060012926). This is a **DESIGN/ARCHITECTURE contract, not an implementation**.
