@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import se.src.infrastructure.storage.core.unit_of_work  # noqa: F401
 from se.src.application.assets import (
     AssetAccessDeniedError,
+    AssetFinalizeError,
     AssetService,
     AssetStateError,
     AssetStorageError,
@@ -481,3 +482,140 @@ async def test_f3_list_assets_is_owner_scoped_and_ready_blob_only(tmp_path):
         await driver.disconnect()
         await engine.dispose()
 
+
+# CAS #74 / CAS-2, CAS-3: RED-first application-layer integrity evidence.
+# These tests intentionally use the existing Base.metadata fixture; raw-SQL
+# FK-OFF physical protection remains in the separate PR533 Alembic oracle.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("immutable_field", "replacement"),
+    (
+        ("id", "asset-f2-illegal-id"),
+        ("owner_user_id", "u-f2-other"),
+        ("blob_id", "blob-f2-other"),
+    ),
+)
+async def test_f2_file_cas_rejects_immutable_values_before_update(
+    immutable_field, replacement
+):
+    engine, sessions = await _database()
+    try:
+        async with _Uow(sessions) as uow:
+            blob = await uow.assets.create_blob(
+                {
+                    "id": "blob-f2-immutable",
+                    "storage_backend": "object-local",
+                    "object_key": "blobs/blob-f2-immutable",
+                    "state": "STAGING",
+                }
+            )
+            await uow.assets.create_file(
+                {
+                    "id": "asset-f2-immutable",
+                    "owner_user_id": "u-f2-original",
+                    "blob_id": blob.id,
+                    "filename": "immutable.bin",
+                    "mime_type": "application/octet-stream",
+                    "origin_type": "USER_UPLOAD",
+                    "state": "STAGING",
+                    "revision": 0,
+                }
+            )
+            await uow.commit()
+
+        async with _Uow(sessions) as uow:
+            # Baseline repository accepts arbitrary values; the expected
+            # fail-closed guard must reject before mutating even a valid FK.
+            with pytest.raises(ValueError):
+                await uow.assets.compare_and_set_file(
+                    "asset-f2-immutable",
+                    expected_revision=0,
+                    expected_state="STAGING",
+                    values={
+                        immutable_field: replacement,
+                        "state": "ERROR",
+                    },
+                )
+            await uow.rollback()
+
+        async with _Uow(sessions) as uow:
+            original = await uow.assets.get_file("asset-f2-immutable")
+            assert original is not None
+            assert original.id == "asset-f2-immutable"
+            assert original.owner_user_id == "u-f2-original"
+            assert original.blob_id == "blob-f2-immutable"
+            assert original.state == "STAGING"
+            assert original.revision == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ("owner", "blob"))
+async def test_f2_finalize_denies_inter_uow_owner_or_blob_drift(
+    drift, tmp_path, monkeypatch
+):
+    # Inject a committed SQL owner/blob change only after the original
+    # FileAsset+FileBlob STAGING transaction has committed and the object was
+    # written, immediately before the independent READY-finalize transaction.
+    engine, sessions = await _database()
+    store = LocalObjectStorageDriver(
+        DriverConfig(options={"root": str(tmp_path / "cas-f2-drift")})
+    )
+    await store.connect()
+    observed_asset_ids = []
+    if drift == "blob":
+        async with _Uow(sessions) as uow:
+            await uow.assets.create_blob(
+                {
+                    "id": "blob-f2-poisoned",
+                    "storage_backend": "object-local",
+                    "object_key": "blobs/not-the-original",
+                    "state": "READY",
+                    "size_bytes": 4,
+                    "sha256": "b" * 64,
+                    "detected_mime_type": "text/plain",
+                }
+            )
+            await uow.commit()
+
+    original_put = store.put_stream
+
+    async def put_then_change_owner_link(*args, **kwargs):
+        result = await original_put(*args, **kwargs)
+        async with _Uow(sessions) as uow:
+            staged = await uow.assets.list_files_by_owner(
+                "u-f2-original", states=["STAGING"]
+            )
+            assert len(staged) == 1
+            row = staged[0]
+            observed_asset_ids.append(row.id)
+            if drift == "owner":
+                row.owner_user_id = "u-f2-intruder"
+            else:
+                row.blob_id = "blob-f2-poisoned"
+            await uow.commit()
+        return result
+
+    monkeypatch.setattr(store, "put_stream", put_then_change_owner_link)
+    service = AssetService(lambda: _Uow(sessions), store)
+    try:
+        payload = b"cas-f2-owner-drift"
+        with pytest.raises(AssetFinalizeError):
+            await service.ingest_stream(
+                owner_user_id="u-f2-original",
+                filename="original.txt",
+                mime_type="text/plain",
+                stream=_chunks(payload),
+                content_length=len(payload),
+            )
+        assert len(observed_asset_ids) == 1
+        async with _Uow(sessions) as uow:
+            row = await uow.assets.get_file(observed_asset_ids[0])
+            assert row is not None
+            assert row.state != "READY", "Must never publish a drifted asset"
+    finally:
+        await store.disconnect()
+        await engine.dispose()

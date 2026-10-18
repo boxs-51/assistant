@@ -20,6 +20,7 @@ from se.src.infrastructure.storage.interfaces.object import (
     ObjectWriteResult,
 )
 from se.src.infrastructure.storage.models.sql.assets import (
+    FileAssetRecord,
     FileProviderBindingRecord,
 )
 from se.src.infrastructure.storage.models.sql.base import Base
@@ -953,3 +954,88 @@ def test_f5c_remains_dormant_and_never_buffers_canonical_asset():
     assert "upload_file_outcome(" not in workflow
     assert "CanonicalAssetHydrationService" not in workflow
     assert "ASSET_HYDRATION_REQUIRED" in workflow
+
+
+# CAS #74 / CAS-4: RED-first original-owner/lineage check at the exact
+# post-provider finalize UoW, after an already-successful canonical snapshot.
+# The remote outcome is known: no SAFE_NO_REMOTE_COMMIT or second upload.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ("owner", "blob"))
+async def test_f5c_finalize_rejects_owner_or_blob_drift_after_remote_success(
+    drift, monkeypatch
+):
+    engine, sessions = await _database()
+    trace = []
+    shared = {}
+    files = _FilesBoundary(
+        outcome=ProviderUploadOutcome.remote_success_known(
+            provider_file_id="files/success-before-drift"
+        ),
+        trace=trace,
+        shared=shared,
+    )
+    store = _TestObjectStore()
+    await _seed_ready_asset(sessions)
+    if drift == "blob":
+        async with sessions() as session:
+            await AssetRepository(session).create_blob(
+                {
+                    "id": "blob-f5c-poisoned",
+                    "storage_backend": "test-object",
+                    "object_key": "blobs/poisoned",
+                    "state": "READY",
+                    "size_bytes": 5,
+                    "sha256": "b" * 64,
+                    "detected_mime_type": "text/plain",
+                }
+            )
+            await session.commit()
+    service = _service(sessions, store, files, trace, shared)
+
+    original_load = service._load_owned_claim
+    injected = False
+
+    async def inject_committed_drift_before_claim_read(uow, **kwargs):
+        nonlocal injected
+        if not injected:
+            assert files.calls == 1, "Drift must be after the remote outcome"
+            injected = True
+            # This separate UoW commits before the finalize repository read.
+            # The production method must recheck original authenticated
+            # owner/file/blob lineage in its own finalize transaction.
+            async with sessions() as session:
+                asset = await session.get(FileAssetRecord, "asset-f5c")
+                assert asset is not None
+                if drift == "owner":
+                    asset.owner_user_id = "u-f5c-intruder"
+                else:
+                    asset.blob_id = "blob-f5c-poisoned"
+                await session.commit()
+        return await original_load(uow, **kwargs)
+
+    monkeypatch.setattr(
+        service, "_load_owned_claim", inject_committed_drift_before_claim_read
+    )
+    try:
+        result = await service.hydrate(
+            owner_user_id="u-f5c",
+            asset_id="asset-f5c",
+            provider_name="gemini",
+        )
+        assert injected
+        assert (
+            result.status is HydrationStatus.HYDRATION_PERSISTENCE_CONFLICT
+        ), "Known remote success must never commit ACTIVE under drifted owner"
+        async with sessions() as session:
+            binding = await session.get(
+                FileProviderBindingRecord, result.binding_id
+            )
+            assert binding is not None
+            assert binding.state == "PROCESSING"
+            assert binding.live_claim_token == "LIVE"
+            assert binding.provider_file_id is None
+        assert files.calls == 1, "Never reupload after remote success"
+    finally:
+        await engine.dispose()
