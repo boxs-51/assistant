@@ -2271,7 +2271,11 @@ class CapabilityRuntime(BaseRuntime):
                     code=exc.code,
                     message=str(exc),
                     category="REMOTE",
-                    retryable=exc.retryable,
+                    # A client-supplied retryable hint is not a server-issued
+                    # authority to start a fresh side effect. This invocation
+                    # is already terminal-committed, so same-ID replay must
+                    # remain terminal and non-retryable.
+                    retryable=False,
                     safe_for_client=True,
                     cause_type=type(exc).__name__,
                     capability_id=capability_id,
