@@ -228,7 +228,9 @@ class CapabilityDispatcher:
                     self._emit(invocation_id, outcome)
                     return
                 if durable.state is ClientInvocationLedgerState.RUNNING:
-                    if not self._durable_running_replay_safe(idempotency):
+                    if not self._durable_running_replay_safe(
+                        idempotency, capability_id=capability_id
+                    ):
                         # A prior process may have entered the target call.
                         # Unsafe/unknown effects remain blocked.
                         return
@@ -270,7 +272,9 @@ class CapabilityDispatcher:
                     self._emit(invocation_id, outcome)
                     return
                 if durable.state is ClientInvocationLedgerState.RUNNING:
-                    if not self._durable_running_replay_safe(idempotency):
+                    if not self._durable_running_replay_safe(
+                        idempotency, capability_id=capability_id
+                    ):
                         self._capacity.release()
                         return
                     replay_existing_running = True
@@ -352,7 +356,19 @@ class CapabilityDispatcher:
         )
 
     @staticmethod
-    def _durable_running_replay_safe(idempotency: str) -> bool:
+    def _durable_running_replay_safe(
+        idempotency: str,
+        *,
+        capability_id: str | None = None,
+    ) -> bool:
+        # MCP-advertised idempotency is not proof of physical effect safety.
+        # After a crash, a RUNNING MCP invocation is an unknown outcome and
+        # must not re-enter the physical handler without a signed replay proof.
+        if (
+            type(capability_id) is str
+            and capability_id.lower().startswith("mcp__")
+        ):
+            return False
         return idempotency in {"IDEMPOTENT", "DEDUPLICATED"}
 
     def _execute_local(

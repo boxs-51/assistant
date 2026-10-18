@@ -1,0 +1,120 @@
+name: SBX3 Agent Process DENY Linux-Windows Contract
+
+on:
+  pull_request:
+    paths:
+      - "se/src/runtimes/agent/adapters/tool.py"
+      - "se/tests/architecture/test_sbx3_agent_process_fail_closed.py"
+      - ".github/workflows/sbx3-agent-process-deny-two-os.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-process-deny:
+    name: agent-process-deny (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Create evidence directory
+        run: python -c "from pathlib import Path; Path('evidence/sbx3-agent-deny').mkdir(parents=True, exist_ok=True)"
+      - name: Agent native process routing and continuation hard DENY
+        run: >-
+          python -m pytest -q -ra
+          --junitxml=evidence/sbx3-agent-deny/junit.xml
+          se/tests/architecture/test_sbx3_agent_process_fail_closed.py
+      - name: Strict JUnit original 22 and additional 8 MCP oracles
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          path = Path("evidence/sbx3-agent-deny/junit.xml")
+          assert path.is_file(), "HARNESS_ERROR: mandatory agent-deny JUnit missing"
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          assert len(suites) == 1, "HARNESS_ERROR: agent-deny JUnit suite count changed"
+          cases = [case for suite in suites for case in suite.findall("testcase")]
+          old = set()
+          base_commands = ("terminal.run", "terminal.launch", "python.run")
+          aliases = ("plugin.terminal.run", "plugin.terminal.launch", "plugin.python.run")
+          for connection in ("None", "remote-client-connection"):
+              for capability in base_commands:
+                  old.add(f"test_uncertified_agent_command_never_dispatches[{connection}-{capability}]")
+          for capability in base_commands:
+              old.add(f"test_uncertified_agent_continuation_rejects_before_runtime[{capability}]")
+          old.add("test_nonprocess_capability_still_uses_normal_agent_policy")
+          for function in (
+              "test_process_alias_execution_fails_before_runtime_dispatch",
+              "test_process_alias_r7_continuation_rejected_before_runtime",
+              "test_process_alias_never_eligible_for_server_continuation",
+              "test_process_alias_r12_coordinator_prepared_continuation_never_dispatches",
+          ):
+              for capability in aliases:
+                  old.add(f"{function}[{capability}]")
+          mcp = {
+              f"test_uncertified_agent_mcp_tool_fails_before_runtime_dispatch[{capability}]"
+              for capability in (
+                  "mcp__ingress__innocent_preview",
+                  "MCP__ingress__replay_probe",
+                  "mcp__another_server__renamed_alias",
+              )
+          }
+          mcp.update({
+              "test_uncertified_agent_mcp_continuation_fails_before_runtime",
+              "test_runtime_boundary_denies_agent_origin_mcp_before_resolution",
+              "test_event_bus_cannot_claim_trusted_origin_for_mcp_execution",
+              "test_durable_continuation_cannot_bypass_mcp_origin_deny",
+              "test_direct_read_only_profile_requires_local_mcp_effect_certification",
+          })
+          assert len(old) == 22 and len(mcp) == 8 and old.isdisjoint(mcp), (
+              "HARNESS_ERROR: 22 original / 8 new oracle inventory invalid"
+          )
+          required = old | mcp
+          found = Counter(case.get("name", "") for case in cases)
+          assert found == Counter(required), (
+              "HARNESS_ERROR: agent-deny oracle missing, duplicated or unreviewed: "
+              f"missing={sorted(required-found.keys())}; "
+              f"extra={sorted(found.keys()-required)}; "
+              f"duplicates={sorted(k for k, v in found.items() if v != 1)}"
+          )
+          assert all(
+              (case.get("classname") or "").endswith("test_sbx3_agent_process_fail_closed")
+              for case in cases
+          ), "HARNESS_ERROR: agent-deny testcase from unexpected module"
+          counters = {
+              kind: sum(case.find(kind) is not None for case in cases)
+              for kind in ("failure", "error", "skipped")
+          }
+          assert int(suites[0].get("tests", "-1")) == len(cases) == 30
+          assert all(int(suites[0].get({"failure": "failures", "error": "errors", "skipped": "skipped"}[kind], "-1")) == 0 for kind in ("failure", "error", "skipped")), (
+              "SEMANTIC_RED: suite recorded failure/error/skip"
+          )
+          assert all(v == 0 for v in counters.values()), (
+              f"SEMANTIC_RED: agent-deny JUnit failure/error/skip {counters}"
+          )
+          print("SBX3_AGENT_PROCESS_DENY=30_PASS_0_FAIL_0_ERROR_0_SKIP; ORIGINAL_22_AND_MCP_8; PORTABLE_ROUTING_NOT_NATIVE_OS_CONFINEMENT")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbx3-agent-deny-${{ matrix.os }}
+          path: evidence/sbx3-agent-deny
+          if-no-files-found: error

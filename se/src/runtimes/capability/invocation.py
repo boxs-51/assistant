@@ -154,6 +154,9 @@ class CapabilityInvocationStore(Protocol):
     async def list_attempts(
         self, invocation_id: str
     ) -> list[CapabilityInvocationAttempt]: ...
+    async def claim_remote_send(
+        self, invocation_id: str, attempt_id: str, attempt_number: int
+    ) -> bool: ...
     async def begin_initial_attempt(
         self,
         invocation: CapabilityInvocation,
@@ -334,10 +337,38 @@ class InMemoryCapabilityInvocationStore:
         self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
         return True
 
+    async def claim_remote_send(
+        self, invocation_id: str, attempt_id: str, attempt_number: int
+    ) -> bool:
+        """Consume exactly one first-send permit for the current running attempt.
+
+        The in-memory store is single-event-loop only. The SQL implementation
+        supplies interprocess serialization for production persistence.
+        """
+        invocation = self.items.get(invocation_id)
+        attempt = self.attempts.get(attempt_id)
+        if (
+            invocation is None
+            or invocation.state is not CapabilityInvocationState.RUNNING
+            or invocation.attempt != attempt_number
+            or attempt is None
+            or attempt.invocation_id != invocation_id
+            or attempt.attempt_number != attempt_number
+            or attempt.state is not CapabilityInvocationState.RUNNING
+            or attempt.metadata.get("ta_r3_send_claimed")
+        ):
+            return False
+        attempt.metadata = {**attempt.metadata, "ta_r3_send_claimed": True}
+        return True
+
     async def update_attempt(self, attempt: CapabilityInvocationAttempt) -> None:
-        if attempt.attempt_id not in self.attempts:
+        stored = self.attempts.get(attempt.attempt_id)
+        if stored is None:
             raise KeyError(attempt.attempt_id)
-        self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+        candidate = attempt.model_copy(deep=True)
+        if stored.metadata.get("ta_r3_send_claimed"):
+            candidate.metadata["ta_r3_send_claimed"] = True
+        self.attempts[attempt.attempt_id] = candidate
 
     async def list_attempts(
         self, invocation_id: str

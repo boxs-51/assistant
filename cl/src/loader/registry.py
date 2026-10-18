@@ -84,16 +84,36 @@ class DynamicRegistry:
             
         return "❌ Command không hợp lệ."
 
-    def get_tool(self, tool_name: str) -> Optional[Dict[str, Any]]:
+    def resolve_tool(self, tool_name: str) -> tuple[str, Dict[str, Any]] | None:
+        """Resolve one canonical handler; never choose by registry insertion order.
+
+        Exact names are authoritative. An unqualified suffix is allowed only
+        when the complete current registry has exactly one matching export.
+        Callers must retain the returned canonical name and handler reference.
+        """
         if tool_name in self.tools:
-            return self.tools[tool_name]
-        
-        # Tra cứu khớp đuôi MCP Tool (ví dụ 'list_directory' -> 'mcp__filesystem__list_directory')
-        for registered_name, tool_data in self.tools.items():
-            if registered_name.endswith(f"__{tool_name}"):
-                return tool_data
-                
-        return None
+            return tool_name, self.tools[tool_name]
+        matches = [
+            (registered_name, tool_data)
+            for registered_name, tool_data in self.tools.items()
+            if registered_name.endswith(f"__{tool_name}")
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                "AMBIGUOUS_MCP_ALIAS: unqualified MCP tool name has "
+                f"{len(matches)} physical candidates"
+            )
+        return matches[0] if matches else None
+
+    def get_tool(self, tool_name: str) -> Optional[Dict[str, Any]]:
+        try:
+            match = self.resolve_tool(tool_name)
+        except ValueError as exc:
+            if str(exc).startswith("AMBIGUOUS_MCP_ALIAS:"):
+                # Preserve the established fail-closed lookup contract.
+                return None
+            raise
+        return match[1] if match is not None else None
 
     def get_skill(self, skill_name: str, *, load: bool = False) -> Optional[Dict[str, Any]]:
         skill = self.skill_mgr.get_skill(skill_name, load=load)

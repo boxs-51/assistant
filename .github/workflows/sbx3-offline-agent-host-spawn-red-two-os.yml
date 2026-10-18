@@ -1,0 +1,48 @@
+name: SBX3 RED-first LOCAL_OFFLINE Agent host process two OS
+
+on:
+  push:
+    branches:
+      - evidence/164-local-offline-agent-host-spawn-red-20261014
+  pull_request:
+    paths:
+      - "cl/tests/test_sbx3_offline_agent_host_spawn_red.py"
+      - "cl/src/core/tool_executor.py"
+      - ".github/workflows/sbx3-offline-agent-host-spawn-red-two-os.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-agent-no-host-popen:
+    name: offline-agent-host-spawn-negative (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Create RED-first evidence directory
+        run: python -c "from pathlib import Path; Path('evidence/sbx3-offline-host-spawn').mkdir(parents=True, exist_ok=True)"
+      - name: Run real local TerminalTool benign process-spawn negatives (RED expected until fixed)
+        run: >-
+          python -m pytest -q -ra -s
+          --junitxml=evidence/sbx3-offline-host-spawn/junit.xml
+          cl/tests/test_sbx3_offline_agent_host_spawn_red.py
+      - name: Upload actual RED-first JUnit, no xfail or skip rewriting
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbx3-offline-host-spawn-${{ matrix.os }}
+          path: evidence/sbx3-offline-host-spawn
+          if-no-files-found: error
