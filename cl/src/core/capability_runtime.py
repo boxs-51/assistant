@@ -178,8 +178,13 @@ class CapabilityRuntime:
                 and capability_id.lower().startswith("mcp__")
             ):
                 certified = metadata.get("trusted_direct_read_only") is True
-                definition["metadata"]["trusted_direct_read_only"] = certified
-                registration_metadata["trusted_direct_read_only"] = certified
+                # Explicit False belongs only to a locally marked MCP export.
+                # Legacy tools with a namespace-like name must retain their
+                # original omission contract unless locally certified True.
+                locally_mcp = isinstance(tool, dict) and tool.get("is_mcp") is True
+                if certified or locally_mcp:
+                    definition["metadata"]["trusted_direct_read_only"] = certified
+                    registration_metadata["trusted_direct_read_only"] = certified
 
             capabilities.append(
                 {
