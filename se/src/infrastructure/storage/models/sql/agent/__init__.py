@@ -1,3 +1,4 @@
+from .agent_instance import AgentInstanceLiveRecord, AgentInstanceReservationRecord
 from .execution import AgentExecutionRecord
 from .iteration import AgentIterationRecord
 from .tool_call import AgentToolCallRecord
@@ -26,6 +27,8 @@ from .transcript_representation import (
 )
 
 __all__ = [
+    "AgentInstanceLiveRecord",
+    "AgentInstanceReservationRecord",
     "AgentExecutionRecord",
     "AgentIterationRecord",
     "AgentToolCallRecord",
