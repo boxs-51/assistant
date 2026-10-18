@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import codecs
 import locale
 import os
@@ -9,8 +10,8 @@ import threading
 import time
 import warnings
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Callable, Dict, Optional, Protocol
 
 import psutil
 
@@ -650,6 +651,56 @@ def _cleanup_failure(
     )
 
 
+
+@dataclass(frozen=True)
+class _BrokerRunCompletion:
+    """SE-owned tree/result reference; never serialized into a tool response."""
+
+    outcome: str
+    tree_ref: Any
+    receipt: Any
+    exit_code: Optional[int] = None
+    stdout: bytes = b""
+    stderr: bytes = b""
+    stdout_bytes_observed: int = 0
+    stderr_bytes_observed: int = 0
+    duration_ms: int = 0
+
+
+class _TrustedTerminalSpawnPort(Protocol):
+    """Internal trusted SE port, NOT an agent-provided capability argument.
+
+    The actual SE issuer/broker must authorize and attest before any child
+    instruction and verify the OS-owned tree on every result/recovery path.
+    A Python Protocol or a caller-supplied instance is not authentication.
+    """
+
+    async def run_preconfined(
+        self, *, authority: Any, command: str, timeout: int,
+        sandbox_relative_cwd: Optional[str], encoding: str,
+        max_stdout_bytes: int, max_stderr_bytes: int, max_total_output_bytes: int,
+    ) -> _BrokerRunCompletion: ...
+
+    async def verify_receipt(
+        self, *, authority: Any, completion: _BrokerRunCompletion,
+    ) -> bool: ...
+
+
+def _validate_sandbox_relative_cwd(cwd: Optional[str]) -> Optional[str]:
+    """Lexical first fence; the SE broker MUST resolve symlinks without TOCTOU."""
+    if cwd is None:
+        return None
+    if not isinstance(cwd, str) or not cwd or len(cwd) > MAX_CWD_CHARS:
+        raise _TerminalToolError("INVALID_ARGUMENT", "invalid sandbox-relative cwd")
+    if (
+        "\x00" in cwd or "\\" in cwd or PurePosixPath(cwd).is_absolute()
+        or PureWindowsPath(cwd).drive
+        or ".." in PurePosixPath(cwd).parts
+    ):
+        raise _TerminalToolError("INVALID_ARGUMENT", "cwd must stay sandbox-relative")
+    return cwd
+
+
 class TerminalTool:
     """Bounded shell command execution and detached launch."""
 
@@ -932,6 +983,121 @@ class TerminalTool:
             return self._success(action, data)
         except _TerminalToolError as exc:
             return self._failure(action, exc)
+
+
+    async def _run_broker_owned(
+        self, *, command: str, timeout: Optional[int] = None,
+        sandbox_relative_cwd: Optional[str] = None,
+        encoding: Optional[str] = None,
+        spawn_port: _TrustedTerminalSpawnPort,
+        authority: Any,
+    ) -> dict[str, Any]:
+        """Private SE-only Agent run bridge, never public execute()/metadata.
+
+        SE owns authentication, native confinement BEFORE first instruction,
+        the complete OS tree, cancellation, recovery, and durable receipt
+        verification. This isolated adapter is NOT native B0 certification.
+        """
+        try:
+            validated_command = _validate_command(command)
+            validated_timeout = _resolve_timeout(timeout, self.default_timeout)
+            validated_encoding = _validate_encoding(encoding)
+            validated_cwd = _validate_sandbox_relative_cwd(sandbox_relative_cwd)
+            if spawn_port is None or authority is None:
+                raise _TerminalToolError(
+                    "SANDBOX_PRESPAWN_DENIED", "trusted native spawn authority required",
+                )
+        except _TerminalToolError as exc:
+            return self._failure("run", exc)
+
+        try:
+            # Never use _run_managed_process, self.run, launch or host Popen here.
+            completion = await spawn_port.run_preconfined(
+                authority=authority,
+                command=validated_command,
+                timeout=validated_timeout,
+                sandbox_relative_cwd=validated_cwd,
+                encoding=validated_encoding,
+                max_stdout_bytes=MAX_STDOUT_BYTES,
+                max_stderr_bytes=MAX_STDERR_BYTES,
+                max_total_output_bytes=MAX_TOTAL_OUTPUT_BYTES,
+            )
+            if not isinstance(completion, _BrokerRunCompletion):
+                raise ValueError("unrecognized broker completion type")
+            if completion.tree_ref is None or completion.receipt is None:
+                raise ValueError("missing broker tree identity or cleanup receipt")
+            # Bool/JSON/result metadata is not proof. This must be a live,
+            # broker-authenticated durable and OS-backed read-through.
+            verified = await spawn_port.verify_receipt(
+                authority=authority, completion=completion,
+            )
+            if verified is not True:
+                raise ValueError("broker did not attest VERIFIED_EMPTY")
+            if completion.outcome not in {"EXITED", "TIMEOUT", "OUTPUT_LIMIT", "IO_ERROR"}:
+                raise ValueError("unrecognized broker outcome")
+            if (
+                not isinstance(completion.stdout, bytes)
+                or not isinstance(completion.stderr, bytes)
+                or type(completion.stdout_bytes_observed) is not int
+                or type(completion.stderr_bytes_observed) is not int
+                or type(completion.duration_ms) is not int
+                or completion.stdout_bytes_observed < len(completion.stdout)
+                or completion.stderr_bytes_observed < len(completion.stderr)
+                or completion.duration_ms < 0
+                or completion.stdout_bytes_observed < 0
+                or completion.stderr_bytes_observed < 0
+            ):
+                raise ValueError("malformed broker output accounting")
+            if (
+                len(completion.stdout) > MAX_STDOUT_BYTES
+                or len(completion.stderr) > MAX_STDERR_BYTES
+                or len(completion.stdout) + len(completion.stderr) > MAX_TOTAL_OUTPUT_BYTES
+                or completion.stdout_bytes_observed > MAX_STDOUT_BYTES
+                or completion.stderr_bytes_observed > MAX_STDERR_BYTES
+                or completion.stdout_bytes_observed + completion.stderr_bytes_observed
+                > MAX_TOTAL_OUTPUT_BYTES
+            ):
+                return self._failure("run", _TerminalToolError(
+                    "TERMINAL_OUTPUT_LIMIT", "terminal command exceeded output byte limit",
+                ))
+            if completion.outcome == "TIMEOUT":
+                return self._failure("run", _TerminalToolError(
+                    "TERMINAL_TIMEOUT", "terminal command exceeded execution timeout",
+                    {"timeout_seconds": validated_timeout},
+                ))
+            if completion.outcome == "OUTPUT_LIMIT":
+                return self._failure("run", _TerminalToolError(
+                    "TERMINAL_OUTPUT_LIMIT", "terminal command exceeded output byte limit",
+                ))
+            if completion.outcome == "IO_ERROR":
+                return self._failure("run", _TerminalToolError(
+                    "TERMINAL_IO_ERROR", "terminal output capture failed",
+                ))
+            if type(completion.exit_code) is not int:
+                raise ValueError("missing broker exit status")
+            # Trusted result is stripped of tree handles and receipts.
+            # AE MUST independently revalidate before persist/reuse/model SUCCESS.
+            return self._success("run", {
+                "exit_code": completion.exit_code,
+                "stdout": completion.stdout.decode(validated_encoding, errors="replace"),
+                "stderr": completion.stderr.decode(validated_encoding, errors="replace"),
+                "stdout_bytes": completion.stdout_bytes_observed,
+                "stderr_bytes": completion.stderr_bytes_observed,
+                "encoding": validated_encoding,
+                "duration_ms": completion.duration_ms,
+                "cwd": validated_cwd or ".",
+            })
+        except asyncio.CancelledError:
+            # The SE broker owns durable cleanup/quarantine. Never fake success.
+            raise
+        except Exception:
+            # Could have spawned/effected already; unknown is non-replayable.
+            # Do not leak broker exception details, owner/paths or OS handles.
+            return self._failure("run", _TerminalToolError(
+                "TERMINAL_OUTCOME_UNKNOWN",
+                "native broker outcome/cleanup could not be verified",
+                {"replay_safe": False},
+            ))
 
     def launch(
         self,
