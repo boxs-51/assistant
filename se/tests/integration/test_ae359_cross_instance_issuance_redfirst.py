@@ -20,6 +20,9 @@ from se.tests.integration.test_ae359_post_ack_loss_physical import (
     _targets, _pg_engines, _redis_driver, _factory, _row_count, _finish,
 )
 from se.src.infrastructure.storage.models.sql.user_data.pending_registration import PendingRegistration
+from se.src.infrastructure.storage.repositories.user_data.pending_registrations import (
+    OTPIssuanceConflict,
+)
 
 
 @pytest.mark.parametrize("purpose", ("registration", "password_reset"))
@@ -76,6 +79,63 @@ def test_r_ack_08_cross_instance_lost_ack_never_issues_second_sql_challenge(purp
             finally:
                 await reader.disconnect()
         finally:
+            await direct.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await direct.aclose()
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_r_ack_09_competing_pg17_writers_issue_only_one_redis_challenge(purpose):
+    """Actual concurrent PG17 issuance reservations serialize before Redis SET."""
+    async def run():
+        ru, _ = _targets()
+        engine = await _pg_engines()
+        email = f"rack09-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        first_driver = await _redis_driver(ru)
+        second_driver = await _redis_driver(ru)
+        direct = redis.Redis.from_url(ru, decode_responses=True)
+        save_name = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify_name = "verify_password_reset" if reset else "verify_and_get_data"
+        try:
+            writers = [
+                OTPStorageService(first_driver, _factory(engine)),
+                OTPStorageService(second_driver, _factory(engine)),
+            ]
+            results = await asyncio.gather(
+                getattr(writers[0], save_name)(
+                    email, {"value": "first"}, "111111"
+                ),
+                getattr(writers[1], save_name)(
+                    email, {"value": "second"}, "222222"
+                ),
+                return_exceptions=True,
+            )
+            assert sum(isinstance(r, OTPIssuanceConflict) for r in results) == 1, (
+                "SEMANTIC_RED: second worker did not lose cross-instance fence",
+                [type(r).__name__ for r in results],
+            )
+            assert sum(r is None for r in results) == 1
+            verifier = OTPStorageService(first_driver, _factory(engine))
+            first = await getattr(verifier, verify_name)(email, "111111")
+            second = await getattr(verifier, verify_name)(email, "222222")
+            assert (first is None) != (second is None), (
+                "SEMANTIC_RED: both OTPs authenticated or both were lost"
+            )
+            assert await _row_count(engine, email) == 0
+        finally:
+            await first_driver.disconnect()
+            await second_driver.disconnect()
             await direct.delete(key, cooldown)
             async with engine.begin() as conn:
                 await conn.execute(
