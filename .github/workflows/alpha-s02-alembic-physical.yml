@@ -32,7 +32,7 @@ jobs:
       - name: Attest checkout revision
         run: python -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['EXPECTED_HEAD']"
       - name: Run real SQLite FK/recursive matrix
-        run: python -m pytest -q -ra se/tests/architecture/test_alpha_s02_merge_redfirst.py se/tests/integration/test_alpha_s02_sqlite_physical.py se/tests/integration/test_terminal_permission_provisioning_p1.py --junitxml=s02-sqlite-physical.xml
+        run: python -m pytest -q -ra se/tests/architecture/test_alpha_s02_merge_redfirst.py se/tests/integration/test_alpha_s02_sqlite_physical.py se/tests/integration/test_terminal_permission_provisioning_p1.py se/tests/integration/test_alpha_s02_recovery_sqlite.py --junitxml=s02-sqlite-physical.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
