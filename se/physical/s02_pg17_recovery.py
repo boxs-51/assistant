@@ -152,7 +152,10 @@ def test_s02_pg17_copy_recovery_without_role_grants(monkeypatch, case):
         assert asyncio.run(_versions(db)) == {MERGE}
         _verify(db, grants, permission=1)
         # Revision 31b strictly forbids downgrade: only merge-marker rollback.
-        # A relative -1 from merge 32a is ambiguous across 31b/31t.\n    # An explicit 31b ancestor drops ONLY 32a, restoring both parent heads.\n    # It must never downgrade 31b's security guard or the 31t permission.\n    command.downgrade(cfg, AIC)
+        # A relative -1 from merge 32a is ambiguous across 31b/31t.
+        # An explicit 31b ancestor drops ONLY 32a, restoring both parent heads.
+        # It must never downgrade 31b's security guard or the 31t permission.
+        command.downgrade(cfg, AIC)
         assert asyncio.run(_versions(db)) == {AIC, TERMINAL}
         _verify(db, grants, permission=1)
         command.upgrade(cfg, "head")
