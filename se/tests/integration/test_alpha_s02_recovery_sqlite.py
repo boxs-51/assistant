@@ -157,7 +157,7 @@ def test_s02_sqlite_rollback_merge_only_and_reupgrade_on_copy(
     assert _versions(clone) == {MERGE}
     _check_data(clone, grants, permission=1)
 
-    command.downgrade(cfg, "-1")  # Undo ONLY merge marker, keep both parents.
+    # A relative -1 from merge 32a is ambiguous across 31b/31t.\n    # An explicit 31b ancestor drops ONLY 32a, restoring both parent heads.\n    # It must never downgrade 31b's security guard or the 31t permission.\n    command.downgrade(cfg, AIC)  # Undo ONLY merge marker, keep both parents.
     assert _versions(clone) == {AIC, TERMINAL}
     _check_data(clone, grants, permission=1)
     command.upgrade(cfg, "head")
