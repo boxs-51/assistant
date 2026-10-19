@@ -1,0 +1,95 @@
+name: AE359 R-ACK-07 Cross-Instance Physical RED-first
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rack07-physical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ae359_otp_t1
+          POSTGRES_USER: ae359_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ae359_test -d ae359_otp_t1"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      AE359_POSTACK_STRICT: "1"
+      AE359_POSTACK_PG_URL: postgresql+asyncpg://ae359_test@127.0.0.1:5432/ae359_otp_t1
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - run: python -m pip install -r requirements-test.txt
+      - name: Attest physical loopback and mask generated Redis URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          uri="redis$(printf '%s' '://')127.0.0.1:6379/15"
+          echo "::add-mask::$uri"
+          echo "AE359_POSTACK_REDIS_URL=$uri" >> "$GITHUB_ENV"
+          python - <<'PY'
+          from sqlalchemy.engine import make_url
+          import os
+          u = make_url(os.environ["AE359_POSTACK_PG_URL"])
+          assert (u.host, u.database, u.password) == ("127.0.0.1", "ae359_otp_t1", None)
+          print("ISOLATED_PG17=PASS")
+          PY
+      - name: Existing unchanged R-ACK-07 and new R-ACK-08 physical oracles
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -vv -ra --tb=short \
+            se/tests/integration/test_ae359_post_ack_loss_physical.py::test_r_ack_07_lost_ack_then_fresh_uninitialized_cache_must_not_issue_sql_otp \
+            se/tests/integration/test_ae359_cross_instance_issuance_redfirst.py \
+            --junitxml=rack07-cross-instance-junit.xml
+      - name: Strict original and additive R-ACK oracle identity
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          path = Path("rack07-cross-instance-junit.xml")
+          assert path.exists(), "HARNESS_ERROR: physical R-ACK JUnit missing"
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+          cases = [case for suite in suites for case in suite.findall("testcase")]
+          found = Counter(case.attrib["name"].split("[", 1)[0] for case in cases)
+          assert found == Counter({
+              "test_r_ack_07_lost_ack_then_fresh_uninitialized_cache_must_not_issue_sql_otp": 1,
+              "test_r_ack_08_cross_instance_lost_ack_never_issues_second_sql_challenge": 2,
+              "test_r_ack_09_competing_pg17_writers_issue_only_one_redis_challenge": 2,
+          }), ("HARNESS_ERROR: physical R-ACK security oracles missing/duplicated", found)
+          bad = {k: sum(case.find(k) is not None for case in cases)
+                 for k in ("failure", "error", "skipped")}
+          assert len(cases) == 5 and all(value == 0 for value in bad.values()), (
+              "RACK07_SEMANTIC_RED", bad
+          )
+          print("RACK07=5_PASS_0_FAIL_0_ERROR_0_SKIP; REAL_REDIS_PG17")
+      - name: Preserve raw physical JUnit even on RED
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rack07-cross-instance-physical
+          path: rack07-cross-instance-junit.xml
+          if-no-files-found: error

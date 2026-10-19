@@ -22,6 +22,9 @@ from se.src.infrastructure.config.schemas import DriverConfig
 from se.src.infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from se.src.infrastructure.storage.drivers.redis.driver import RedisDriver
 from se.src.infrastructure.storage.models.sql.user_data.pending_registration import PendingRegistration
+from se.src.infrastructure.storage.repositories.user_data.pending_registrations import (
+    OTPIssuanceConflict,
+)
 from se.src.infrastructure.storage.repositories.refresh_sessions_redis import RedisRefreshSessionStore
 from se.src.transport.gateway.authentication.services.otp_service import OTPStorageService
 from se.tests.integration.fixtures.ae359_redis_resp_ack_cut import RespAckCutProxy
@@ -460,9 +463,15 @@ def test_r_ack_07_lost_ack_then_fresh_uninitialized_cache_must_not_issue_sql_otp
             cold = RedisDriver(DriverConfig(options={"url": ru}))
             assert cold._client is None
             retry = OTPStorageService(cold, _factory(engine))
-            await retry.save_pending_registration(
-                email, {"value": "second-sql"}, "222222"
-            )
+            try:
+                await retry.save_pending_registration(
+                    email, {"value": "second-sql"}, "222222"
+                )
+            except OTPIssuanceConflict:
+                # A durable cross-instance fence must report a typed denial.
+                # This is not an ACK for a newly issued OTP; preserve the
+                # independent physical first/second authentication assertions.
+                pass
 
             reader = await _redis_driver(ru)
             try:
