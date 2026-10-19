@@ -17,6 +17,25 @@ class OTPStorageService:
         self.otp_ttl = 300
         self.cooldown_ttl = 60
 
+    async def _reserve_issuance(self, email: str, purpose: str) -> None:
+        """Commit a cross-process SQL issuance fence before any Redis SET.
+
+        This pre-dispatch commit is the authoritative first-writer claim. A
+        later instance with a newly uninitialized RedisDriver cannot issue
+        another independent SQL OTP after the original Redis ACK was lost.
+        Legacy test UOW fakes without a repository reservation capability
+        remain fixture-only; a real SQL UOW MUST expose the fence.
+        """
+        async with self.uow_factory() as uow:
+            reserver = getattr(uow.pending_registrations, "reserve_otp_issuance", None)
+            if not callable(reserver):
+                if isinstance(uow, SqlAlchemyUnitOfWork):
+                    raise RuntimeError("durable OTP issuance authority unavailable")
+                return
+            await reserver(email, purpose, self.otp_ttl)
+            # A failed/unknown COMMIT aborts issuance before touching Redis.
+            await uow.commit()
+
     async def save_pending_registration(self, email: str, user_data: dict, otp: str) -> None:
         payload_str = json.dumps({
             "user_data": user_data,
@@ -24,6 +43,9 @@ class OTPStorageService:
             "purpose": "registration",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
+        # Durable first-writer reservation must COMMIT before Redis may execute.
+        # On conflict or unknown COMMIT no cache/SQL dispatch is allowed.
+        await self._reserve_issuance(email, "registration")
         if self.cache_driver is not None:
             try:
                 await self.cache_driver.set(f"pending_reg:{email}", payload_str, self.otp_ttl)
@@ -74,6 +96,7 @@ class OTPStorageService:
             "purpose": "password_reset",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
+        await self._reserve_issuance(email, "password_reset")
         if self.cache_driver is not None:
             try:
                 await self.cache_driver.set(

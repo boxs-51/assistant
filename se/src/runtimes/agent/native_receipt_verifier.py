@@ -11,12 +11,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..capability.native_tree_recovery_b0 import NativeTreeHold
+
+# Canonical Native IDs plus the already recognized process aliases used by
+# SBX3 Agent policy. A renamed registration is still a process capability;
+# neither caller metadata nor alias spelling can bypass the receipt boundary.
 NATIVE_AGENT_CAPABILITIES = frozenset({
     "terminal.run", "terminal.launch", "python.run",
+    "plugin.terminal.run", "plugin.terminal.launch", "plugin.python.run",
 })
 
 
-class NativeReceiptUnavailable(RuntimeError):
+class NativeReceiptUnavailable(NativeTreeHold):
+    """AE durable receipt DENY also satisfies the legacy Native tree HOLD.
+
+    Both exceptions are negative-only. This compatibility subtype cannot be
+    treated as an OS VERIFIED_EMPTY proof or an authority to resume/remove.
+    """
     code = "AE_NATIVE_RECEIPT_UNAVAILABLE"
 
     def __init__(self, phase: str):

@@ -26,7 +26,36 @@ jobs:
       - name: Install pinned test dependencies
         run: python -m pip install -r requirements-test.txt
       - name: Run real hard crash, OS tree negative, CRT/AE/root gates
-        run: python -m pytest -q -ra se/tests/architecture/test_sbx3_d2_recovery_fences.py
+        run: python -m pytest -q -ra se/tests/architecture/test_sbx3_d2_recovery_fences.py --junitxml=sbx3-d2-legacy-junit.xml
+      - name: Verify exact D2 root custody oracle identity and preserve raw JUnit
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          source = Path("sbx3-d2-legacy-junit.xml")
+          assert source.is_file(), "HARNESS_ERROR: legacy D2 raw JUnit missing"
+          cases = list(ET.parse(source).getroot().iter("testcase"))
+          case_names = Counter(c.get("name", "").split("[", 1)[0] for c in cases)
+          expected = ["test_manager_native_root_quarantined_until_authority_readback","test_restart_reattach_quarantines_native_root_until_os_proof","test_restart_with_missing_os_scope_never_adopts_or_deletes_root","test_manager_rejects_foreign_native_binding_before_spawn"]
+          assert len(cases) == 15, ("HARNESS_ERROR: legacy D2 case count changed", len(cases))
+          assert all(case_names[name] == 1 for name in expected), (
+              "HARNESS_ERROR: missing/duplicate D2 custody oracle", case_names
+          )
+          failures = {
+              key: sum(c.find(key) is not None for c in cases)
+              for key in ("failure", "error", "skipped")
+          }
+          assert all(n == 0 for n in failures.values()), ("D2_NEGATIVE_RED", failures)
+          print("D2_ROOT_CUSTODY=4_PASS; 15_CASES_TOTAL; NO_OS_VERIFIED_EMPTY_CLAIM")
+      - name: Upload raw D2 legacy custody evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbx3-d2-legacy-${{ runner.os }}
+          path: sbx3-d2-legacy-junit.xml
+          if-no-files-found: error
       - name: Record native B0 certification limits
         if: always()
         run: |
@@ -45,7 +74,36 @@ jobs:
       - name: Install pinned test dependencies
         run: python -m pip install -r requirements-test.txt
       - name: Run real Windows hard crash and fail-closed path
-        run: python -m pytest -q -ra se/tests/architecture/test_sbx3_d2_recovery_fences.py
+        run: python -m pytest -q -ra se/tests/architecture/test_sbx3_d2_recovery_fences.py --junitxml=sbx3-d2-legacy-junit.xml
+      - name: Verify exact D2 root custody oracle identity and preserve raw JUnit
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          source = Path("sbx3-d2-legacy-junit.xml")
+          assert source.is_file(), "HARNESS_ERROR: legacy D2 raw JUnit missing"
+          cases = list(ET.parse(source).getroot().iter("testcase"))
+          case_names = Counter(c.get("name", "").split("[", 1)[0] for c in cases)
+          expected = ["test_manager_native_root_quarantined_until_authority_readback","test_restart_reattach_quarantines_native_root_until_os_proof","test_restart_with_missing_os_scope_never_adopts_or_deletes_root","test_manager_rejects_foreign_native_binding_before_spawn"]
+          assert len(cases) == 15, ("HARNESS_ERROR: legacy D2 case count changed", len(cases))
+          assert all(case_names[name] == 1 for name in expected), (
+              "HARNESS_ERROR: missing/duplicate D2 custody oracle", case_names
+          )
+          failures = {
+              key: sum(c.find(key) is not None for c in cases)
+              for key in ("failure", "error", "skipped")
+          }
+          assert all(n == 0 for n in failures.values()), ("D2_NEGATIVE_RED", failures)
+          print("D2_ROOT_CUSTODY=4_PASS; 15_CASES_TOTAL; NO_OS_VERIFIED_EMPTY_CLAIM")
+      - name: Upload raw D2 legacy custody evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbx3-d2-legacy-${{ runner.os }}
+          path: sbx3-d2-legacy-junit.xml
+          if-no-files-found: error
       - name: Record native Windows certification limits
         if: always()
         shell: pwsh

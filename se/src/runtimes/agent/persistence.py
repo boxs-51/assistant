@@ -2995,6 +2995,14 @@ class DurableAgentStore:
         values = _normalize_json_fields(
             values, _TOOL_RESULT_JSON_FIELDS, path="agent_tool_results"
         )
+        # AE A1 / D2: a positive Native result is never a provisional permit.
+        # Deny before UOW acquisition as well as at COMMITTED/readthrough
+        # boundaries: neither broken storage nor a compatibility adapter may
+        # turn unverified Native success into an unrelated transport error.
+        require_native_receipt(
+            values.get("capability_id"), values.get("success"),
+            phase="before_UOW_native_result",
+        )
         async with self.uow_factory() as uow:
             locked_recovery_execution = None
             if recovery_fence is not None:

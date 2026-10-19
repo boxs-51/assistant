@@ -26,8 +26,13 @@ class NativeTreeHold(RuntimeError):
     """Unknown/foreign/unsupported native tree: no cleanup or durable success."""
 
 
+# Match AE A1's canonical and registered process-alias vocabulary. This is
+# only a deny rule; it does not authorize native spawn or VERIFIED_EMPTY.
 AGENT_UNCERTIFIED_PROCESS_IDS = frozenset(
-    {"terminal.run", "terminal.launch", "python.run"}
+    {
+        "terminal.run", "terminal.launch", "python.run",
+        "plugin.terminal.run", "plugin.terminal.launch", "plugin.python.run",
+    }
 )
 
 
