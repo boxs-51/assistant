@@ -36,3 +36,19 @@ stage_id, parent_issue, requirement_contract, exact_base_sha, changed_paths, RED
 
 ## Existing evidence and unverified claims
 AIC467 exact prior alpha PG17 run 39258636299 succeeded. Prior PR #648 Linux architecture run 39157350888 failed on a different HEAD. Neither is exact normalized-doc alpha full-system PASS. Migrations have two heads, and Native and OTP physical release claims remain HOLD.
+
+## Live issue-to-stage link map (tracking identifiers, not PASS)
+| Stage | Issue | Original parent and dependency |
+|---|---|---|
+| S00 documentation | [#656](https://github.com/boxs-51/assistant/issues/656) and [tracker #657](https://github.com/boxs-51/assistant/issues/657) | documentation-only normalization complete; broader #656 technical follow-ups remain open |
+| S01 evidence | [#658](https://github.com/boxs-51/assistant/issues/658) | #655, after S00 |
+| S02 Alembic | [#659](https://github.com/boxs-51/assistant/issues/659) | #649, after S01 gate |
+| S03 account owner | [#660](https://github.com/boxs-51/assistant/issues/660) | #649, after S02 gate |
+| S04 OTP | [#661](https://github.com/boxs-51/assistant/issues/661) | #650, after S03 gate |
+| S05 Native | [#662](https://github.com/boxs-51/assistant/issues/662) | #651, after S04 gate |
+| S06 CL/HITL | [#663](https://github.com/boxs-51/assistant/issues/663) | #652, after S05 gate |
+| S07 identity/Skill | [#664](https://github.com/boxs-51/assistant/issues/664) | #653, after S06 gate |
+| S08 optional features | [#654](https://github.com/boxs-51/assistant/issues/654) | proposal only; no source changes without an independent decision |
+| S09 integrated E2E | [#665](https://github.com/boxs-51/assistant/issues/665) | #655 + all mandatory S01–S07 gates |
+
+**Release-gate rule:** S01 may discover that S02 diagnosis can proceed but cannot falsely declare S01 full-suite green. Freeze the relevant inherited RED truth and unblock the smallest valid successor only with grounded evidence and stated residual holds.

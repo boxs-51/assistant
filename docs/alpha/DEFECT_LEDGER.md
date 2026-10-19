@@ -26,3 +26,15 @@
 [#649](https://github.com/boxs-51/assistant/issues/649) · [#650](https://github.com/boxs-51/assistant/issues/650) · [#651](https://github.com/boxs-51/assistant/issues/651) · [#652](https://github.com/boxs-51/assistant/issues/652) · [#653](https://github.com/boxs-51/assistant/issues/653) · [#654](https://github.com/boxs-51/assistant/issues/654) · [#655](https://github.com/boxs-51/assistant/issues/655) · [#656](https://github.com/boxs-51/assistant/issues/656).
 
 No source fixes or full E2E certification occur in this document.
+
+## Scoped execution issues (current, not merely proposed)
+- [#657](https://github.com/boxs-51/assistant/issues/657): linear coordination.
+- [#658](https://github.com/boxs-51/assistant/issues/658): F-002/F-004, exact alpha regression + 36 semantic-drift appearances, S01.
+- [#659](https://github.com/boxs-51/assistant/issues/659): F-001, Alembic branch DAG, S02.
+- [#660](https://github.com/boxs-51/assistant/issues/660): F-005, account-owner lifecycle, S03.
+- [#661](https://github.com/boxs-51/assistant/issues/661): F-006, OTP/refresh/logout, S04.
+- [#662](https://github.com/boxs-51/assistant/issues/662): F-007, Native OS issuer/root, S05.
+- [#663](https://github.com/boxs-51/assistant/issues/663): F-008, CL/HITL, S06.
+- [#664](https://github.com/boxs-51/assistant/issues/664): F-009, identity/Skill/API, S07.
+- [#665](https://github.com/boxs-51/assistant/issues/665): integrated end-to-end exit, S09.
+No issue creation is a source fix. Statuses remain OPEN pending stage-specific evidence.
