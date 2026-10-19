@@ -39,5 +39,16 @@ C-S02-01 HARD_CONFLICT / UNRESOLVED:
 C-S02-02 ROLLBACK_GUARD:
 - PostgreSQL 31b refuses a guard-removing downgrade. Do not bypass it. A valid interruption/rollback proof should validate preserved state and fail-closed behavior; do not claim unrestricted PG downgrade.
 
+## Implementation checkpoint (code present, NOT VERIFIED)
+
+Draft PR #667 now contains:
+- NEW merge-only 32a_alpha_31b_31t_merge.py with strict parents (31b,31t), no role grant, DML, DDL, stamp or reparent.
+- ADD-only RED-first graph test, ADD SQLite historical regression covering 30a/31b/31t x SQLite FK/recursive OFF/ON with real temporary databases and owner/permission denials.
+- ADD strict explicit-only PostgreSQL17 physical test at se/physical/s02_pg17_physical.py, three disposable loopback-only databases (30a,31b,31t) and immutable pg catalog/role/owner checks.
+- ADD dedicated Linux/Windows SQLite and Linux PostgreSQL17 CI workflow at .github/workflows/alpha-s02-alembic-physical.yml; raw JUnit artifact paths defined.
+- Topology-only exact changes to 14 historical DAG shape tests plus terminal provisioning test: older required merge 5b and fork 4f remain pinned, new merge 32a and fork 30a added explicitly; all role grant, authorization, data-owner and denial assertions unchanged.
+
+**Validation status:** all new/old exact-head GitHub workflows were queued on last inspection. No observed post-fix SQLite/PG17 runtime PASS, no exact-HEAD full-suite GREEN, and no completed PR #667 baseline RED-first CI. A local reconstructed Alembic metadata fixture observed two heads before adding 32a and one afterward; it is NOT a substitute for real repository/physical test proof. S02 = IN_PROGRESS / UNVERIFIED; S03 HOLD. Real PG17 rollback of 31b remains fail-closed, not a successful security downgrade. Full existing platform SEMANTIC_RED remains separately held under #660/#655/#662/#664.
+
 ## Gate
-At initial stage this branch carries diagnostic documentation and additive RED-first tests only. No source migrations, existing tests, workflows, security oracle, alpha/main merge, deploy, or Native enablement. Exact new CI evidence and any conflicts must be recorded before claiming S02 implementation PASS.
+No alpha/main merge, deployment or production database updates. Do not promote S02 until exact-head regression, actual raw JUnit, targeted physical SQLite/PG17 and separate reviewer provenance are verified.
