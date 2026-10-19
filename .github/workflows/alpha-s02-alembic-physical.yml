@@ -85,7 +85,7 @@ jobs:
           )
           PY
       - name: Run strict real PostgreSQL 17 historical migrations
-        run: python -m pytest -q -ra se/physical/s02_pg17_physical.py --junitxml=s02-pg17-physical.xml
+        run: python -m pytest -q -ra se/physical/s02_pg17_physical.py se/physical/s02_pg17_recovery.py --junitxml=s02-pg17-physical.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
