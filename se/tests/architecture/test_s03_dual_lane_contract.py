@@ -114,3 +114,27 @@ def test_portable_junit_counts_real_pytest_subtests_without_weakening_total(tmp_
     output.unlink()
     with pytest.raises(AssertionError, match="Missing portable pytest output"):
         verify_portable(path, output)
+
+
+
+def test_junit_xpass_word_in_identity_is_not_a_result(tmp_path):
+    """Regression for real S03 composite #39437899106 (false XPASS)."""
+    nodes = [
+        "se/tests/integration/xfail_filename.py::test_xpass_in_name_is_normal",
+        "se/tests/integration/normal.py::test_other_normal",
+    ]
+    path = _write(tmp_path, nodes)
+    assert read_junit(path, allow_skips=False) == set(nodes)
+
+    tree = ET.parse(path)
+    case = tree.getroot().find("testcase")
+    for status_key, status_value in (
+        ("status", "xpassed"),
+        ("result", "xfailed"),
+        ("outcome", "XPASS"),
+    ):
+        case.set(status_key, status_value)
+        tree.write(path, encoding="utf-8")
+        with pytest.raises(AssertionError, match="Xfail/xpass status"):
+            read_junit(path, allow_skips=False)
+        del case.attrib[status_key]

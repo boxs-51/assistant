@@ -77,7 +77,14 @@ def read_junit(path: Path, *, allow_skips: bool, unrepresented_subtests: int = 0
         require(case.find("failure") is None and case.find("error") is None, "A testcase failed")
         if not allow_skips:
             require(case.find("skipped") is None, "Physical testcase skipped/xfail")
-        require(not any("xfail" in str(v).lower() or "xpass" in str(v).lower() for v in case.attrib.values()), "Xfail/xpass status")
+        # JUnit identity fields may legitimately contain "xpass"/"xfail" in
+        # test names; these strings are not an execution status. Keep vetoes on
+        # all remaining attributes, result elements and same-run pytest summary.
+        require(not any(
+            "xfail" in str(value).lower() or "xpass" in str(value).lower()
+            for key, value in case.attrib.items()
+            if key not in {"name", "classname"}
+        ), "Xfail/xpass status")
     return set(names)
 
 
