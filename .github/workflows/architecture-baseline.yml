@@ -30,8 +30,15 @@ jobs:
             requirements-runtime.txt
       - name: Install test dependencies
         run: python -m pip install -r requirements-test.txt
+      # AE359 strict PG17/Redis physical suites have independent unfiltered
+      # PR workflows with exact-SHA evidence. Do not silently skip them here:
+      # this is the exact frozen three-case Architecture/physical split.
       - name: Run full suite
-        run: python -m pytest -q
+        run: >-
+          python -m pytest -q
+          --ignore=se/tests/integration/test_ae359_utc_naive_pg17_redfirst.py
+          --ignore=se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py
+          --ignore=se/tests/integration/test_ae359_post_ack_loss_physical.py
 
   windows-client-contracts:
     runs-on: windows-latest

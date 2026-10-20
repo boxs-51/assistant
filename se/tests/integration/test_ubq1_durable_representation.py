@@ -139,7 +139,8 @@ def test_ubq1_25a_is_linear_and_sqlite_triggers_hold_with_fk_pragma_off(
         == "24a_r12_stale_lease_scan_index"
     )
 
-    command.upgrade(config, "head")
+    # Exercise 25a's own trigger and downgrade guard, not later S03.
+    command.upgrade(config, "25a_ubq1_user_budget_foundation")
 
     connection = sqlite3.connect(database)
     try:
