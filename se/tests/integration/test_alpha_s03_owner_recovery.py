@@ -78,3 +78,15 @@ def test_s03_disposable_owner_crash_replay_and_negative_sql(tmp_path, monkeypatc
     with sqlite3.connect(source) as c:
         assert c.execute("SELECT version_num FROM alembic_version").fetchone()[0] == S02
         assert c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='s03_owner_witness'").fetchone()[0] == 0
+
+def test_s03_forward_only_downgrade_refused(tmp_path, monkeypatch):
+    # Historical R8/R11/UBQ1 rollback probes must target their own revision.
+    # The latest S03 security fence is intentionally not reversible.
+    database = tmp_path / "s03-forward-only.sqlite"
+    cfg = _cfg(monkeypatch, database)
+    command.upgrade(cfg, S03)
+    with pytest.raises(RuntimeError, match="S03_OWNER_INTEGRITY_FORWARD_ONLY"):
+        command.downgrade(cfg, S02)
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == S03
+

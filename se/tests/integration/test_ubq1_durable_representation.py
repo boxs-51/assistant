@@ -298,7 +298,7 @@ def test_ubq1_empty_downgrade_drops_triggers_before_tables(
         f"sqlite+aiosqlite:///{database.as_posix()}",
     )
     config = _config(database)
-    command.upgrade(config, "head")
+    command.upgrade(config, "25a_ubq1_user_budget_foundation")
     command.downgrade(config, "24a_r12_stale_lease_scan_index")
 
     connection = sqlite3.connect(database)

@@ -116,7 +116,7 @@ def test_r11_b1_migration_is_reversible_and_enforces_shape(
     config = _config(database)
 
     command.upgrade(config, "15b_r9_aggregate_admission")
-    command.upgrade(config, "head")
+    command.upgrade(config, "16a_r11_transcript_representation")
 
     connection = sqlite3.connect(database)
     try:

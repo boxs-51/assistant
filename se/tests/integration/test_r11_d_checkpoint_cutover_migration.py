@@ -111,7 +111,7 @@ def test_r11_d_migration_adds_ref_pair_constraint_and_is_reversible(
     config = _config(database)
 
     command.upgrade(config, "16a_r11_transcript_representation")
-    command.upgrade(config, "head")
+    command.upgrade(config, "17a_r11_checkpoint_cutover")
 
     connection = sqlite3.connect(database)
     try:

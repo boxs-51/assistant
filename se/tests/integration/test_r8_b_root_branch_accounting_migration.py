@@ -295,7 +295,7 @@ def test_r8_b_reconciles_historical_root_branch_accounting_and_downgrades(
     finally:
         connection.close()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "14b_r8_root_branch_accounting")
 
     connection = sqlite3.connect(database)
     try:

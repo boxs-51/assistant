@@ -90,7 +90,7 @@ def _sqlite_upgrade() -> None:
     CREATE TRIGGER trg_s03_user_delete BEFORE DELETE ON users
     WHEN EXISTS(SELECT 1 FROM s03_owner_witness w WHERE w.owner_user_id=OLD.id)
     BEGIN
-      SELECT RAISE(ABORT,'UBQ2_S03_RETAINED_OWNER_DELETE_DENIED')
+      SELECT RAISE(ABORT,'UBQ_INTEGRITY_USER_HISTORY_RESTRICTED')
       WHERE EXISTS(SELECT 1 FROM s03_owner_witness w
                    WHERE w.owner_user_id=OLD.id AND w.ubq_retained=1);
       SELECT RAISE(ABORT,'S03_RETAINED_OWNER_DELETE_DENIED');

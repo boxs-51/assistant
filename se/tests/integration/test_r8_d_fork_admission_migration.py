@@ -131,7 +131,7 @@ def test_r8_d_fork_admission_migration_is_empty_and_reversible(
     database = tmp_path / "r8_d_migration.sqlite"
     config = _upgrade_to_14b(database, monkeypatch)
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "14c_r8_fork_admission")
 
     connection = sqlite3.connect(database)
     try:
