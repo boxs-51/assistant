@@ -432,6 +432,9 @@ class AssetRepository:
         expected_state: str,
         expected_live_claim_token: Optional[str],
         values: Mapping[str, Any],
+        expected_owner_user_id: Optional[str] = None,
+        expected_source_blob_id: Optional[str] = None,
+        expected_source_sha256: Optional[str] = None,
     ) -> Optional[FileProviderBindingRecord]:
         # The durable provider binding identity and canonical source
         # fingerprint never change through a lifecycle compare-and-set.
@@ -455,6 +458,34 @@ class AssetRepository:
             predicates.append(
                 FileProviderBindingRecord.live_claim_token
                 == expected_live_claim_token
+            )
+
+        if expected_owner_user_id is not None:
+            # Correlate the ACTIVE transition against durable canonical file
+            # ownership, blob lineage and the claim's original fingerprint.
+            # The condition belongs in the same SQL UPDATE as the CAS fence,
+            # rather than in a separate preflight read that can become stale.
+            if not expected_source_blob_id or not expected_source_sha256:
+                raise ValueError("CAS_MISSING_CANONICAL_SOURCE_FENCE")
+            predicates.append(
+                select(FileAssetRecord.id)
+                .join(
+                    FileBlobRecord,
+                    FileAssetRecord.blob_id == FileBlobRecord.id,
+                )
+                .where(
+                    FileAssetRecord.id == FileProviderBindingRecord.file_id,
+                    FileAssetRecord.owner_user_id == expected_owner_user_id,
+                    FileAssetRecord.blob_id == expected_source_blob_id,
+                    FileAssetRecord.state == "READY",
+                    FileBlobRecord.state == "READY",
+                    FileBlobRecord.sha256 == expected_source_sha256,
+                    FileProviderBindingRecord.source_blob_id
+                    == expected_source_blob_id,
+                    FileProviderBindingRecord.source_sha256
+                    == expected_source_sha256,
+                )
+                .exists()
             )
 
         next_values = dict(values)
