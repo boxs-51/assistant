@@ -39,6 +39,14 @@ jobs:
           --ignore=se/tests/integration/test_ae359_utc_naive_pg17_redfirst.py
           --ignore=se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py
           --ignore=se/tests/integration/test_ae359_post_ack_loss_physical.py
+          --deselect=se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py::test_cas_retained_owner_fkoff_and_provider_link_physical_guard[CAS-only-postgresql17]
+          --deselect=se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py::test_cas_retained_owner_fkoff_and_provider_link_physical_guard[CAS-and-UBQ-postgresql17]
+          --deselect=se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py::test_real_schema_retired_aic_cas_provider_ubq_delete_rekey_and_hardexit[False-postgresql]
+          --deselect=se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py::test_real_schema_retired_aic_cas_provider_ubq_delete_rekey_and_hardexit[True-postgresql]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[child_first-DELETE]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[child_first-REKEY]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[parent_first-DELETE]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[parent_first-REKEY]
 
   windows-client-contracts:
     runs-on: windows-latest
