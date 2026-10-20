@@ -34,7 +34,7 @@ def interrupt(conn, cursor, statement, parameters, context, executemany):
 cfg = Config(str(Path(os.environ["S02_REPO_ROOT"]) / "alembic.ini"))
 cfg.set_main_option("script_location", str(Path(os.environ["S02_REPO_ROOT"]) /
     "se/src/infrastructure/storage/migrations/sql"))
-command.upgrade(cfg, MERGE)
+command.upgrade(cfg, "32a_alpha_31b_31t_merge")
 raise SystemExit(99)  # Injection was not reached: FAIL CLOSED.
 """
 

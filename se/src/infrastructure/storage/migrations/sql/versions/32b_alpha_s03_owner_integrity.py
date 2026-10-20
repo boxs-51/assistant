@@ -29,6 +29,10 @@ _OWNER_SOURCES = (
     ("user_budget_task_bindings", "owner_user_id"),
     ("user_budget_dual_accounting_receipts", "owner_user_id"),
 )
+_UBQ_OWNER_TABLES = frozenset(
+    table for table, _owner in _OWNER_SOURCES
+    if table.startswith("user_budget_") or table == "user_tool_budget_usage"
+)
 
 
 def _sqlite_upgrade() -> None:
@@ -38,7 +42,8 @@ def _sqlite_upgrade() -> None:
     op.execute(sa.text("""
     CREATE TABLE s03_owner_witness (
       owner_user_id TEXT PRIMARY KEY NOT NULL,
-      owner_email TEXT NOT NULL UNIQUE
+      owner_email TEXT NOT NULL UNIQUE,
+      ubq_retained INTEGER NOT NULL DEFAULT 0 CHECK(ubq_retained IN (0,1))
     )"""))
     op.execute(sa.text("""
     CREATE TABLE s03_memory_witness (
@@ -60,6 +65,12 @@ def _sqlite_upgrade() -> None:
             "SELECT DISTINCT u.id,u.email FROM " + table +
             " AS c JOIN users AS u ON u.id=c." + owner
         ))
+        if table in _UBQ_OWNER_TABLES:
+            # Retain track provenance even when a child is later removed.
+            op.execute(sa.text(
+                "UPDATE s03_owner_witness SET ubq_retained=1 "
+                "WHERE owner_user_id IN (SELECT owner_user_id FROM " + table + ")"
+            ))
     op.execute(sa.text(
         "INSERT INTO s03_memory_witness(memory_id,promotion_authority_id) "
         "SELECT memory_id,promotion_authority_id FROM memory_records"
@@ -67,6 +78,10 @@ def _sqlite_upgrade() -> None:
 
     op.execute(sa.text("""
     CREATE TRIGGER trg_s03_user_insert AFTER INSERT ON users BEGIN
+      SELECT RAISE(ABORT,'UBQ2_S03_OWNER_REPLACE_DENIED')
+      WHERE EXISTS(SELECT 1 FROM s03_owner_witness w
+                   WHERE w.ubq_retained=1
+                     AND (w.owner_user_id=NEW.id OR w.owner_email=NEW.email));
       SELECT RAISE(ABORT,'S03_OWNER_REPLACE_DENIED')
       WHERE EXISTS(SELECT 1 FROM s03_owner_witness w
                    WHERE w.owner_user_id=NEW.id OR w.owner_email=NEW.email);
@@ -74,14 +89,26 @@ def _sqlite_upgrade() -> None:
     op.execute(sa.text("""
     CREATE TRIGGER trg_s03_user_delete BEFORE DELETE ON users
     WHEN EXISTS(SELECT 1 FROM s03_owner_witness w WHERE w.owner_user_id=OLD.id)
-    BEGIN SELECT RAISE(ABORT,'S03_RETAINED_OWNER_DELETE_DENIED'); END"""))
+    BEGIN
+      SELECT RAISE(ABORT,'UBQ2_S03_RETAINED_OWNER_DELETE_DENIED')
+      WHERE EXISTS(SELECT 1 FROM s03_owner_witness w
+                   WHERE w.owner_user_id=OLD.id AND w.ubq_retained=1);
+      SELECT RAISE(ABORT,'S03_RETAINED_OWNER_DELETE_DENIED');
+    END"""))
     op.execute(sa.text("""
     CREATE TRIGGER trg_s03_user_rekey BEFORE UPDATE OF id,email ON users
     WHEN (NEW.id != OLD.id OR NEW.email != OLD.email) AND EXISTS(
       SELECT 1 FROM s03_owner_witness w
       WHERE w.owner_user_id=OLD.id OR w.owner_user_id=NEW.id
          OR w.owner_email=NEW.email)
-    BEGIN SELECT RAISE(ABORT,'S03_RETAINED_OWNER_REKEY_DENIED'); END"""))
+    BEGIN
+      SELECT RAISE(ABORT,'UBQ2_S03_RETAINED_OWNER_REKEY_DENIED')
+      WHERE EXISTS(SELECT 1 FROM s03_owner_witness w
+                   WHERE w.ubq_retained=1 AND
+                     (w.owner_user_id=OLD.id OR w.owner_user_id=NEW.id
+                      OR w.owner_email=NEW.email));
+      SELECT RAISE(ABORT,'S03_RETAINED_OWNER_REKEY_DENIED');
+    END"""))
 
     for table, owner in _OWNER_SOURCES:
         op.execute(sa.text(
@@ -91,7 +118,12 @@ def _sqlite_upgrade() -> None:
             "NOT EXISTS(SELECT 1 FROM users WHERE id=NEW." + owner + "); "
             "INSERT OR IGNORE INTO s03_owner_witness(owner_user_id,owner_email) "
             "SELECT id,email FROM users WHERE id=NEW." + owner + "; "
-            "END"
+            + (
+                "UPDATE s03_owner_witness SET ubq_retained=1 "
+                "WHERE owner_user_id=NEW." + owner + "; "
+                if table in _UBQ_OWNER_TABLES else ""
+            )
+            + "END"
         ))
 
     # Immutable memory: even a no-op UPDATE or UPSERT DO UPDATE is denied.
