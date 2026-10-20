@@ -554,20 +554,30 @@ class AssetRepository:
         expected_revision: int,
         expected_state: str,
         values: Mapping[str, Any],
+        expected_owner_user_id: Optional[str] = None,
+        expected_blob_id: Optional[str] = None,
     ) -> Optional[FileAssetRecord]:
         # Asset identity, tenant ownership and canonical blob lineage are
         # immutable. Caller-provided values may only advance lifecycle state.
         if {"id", "owner_user_id", "blob_id"}.intersection(values):
             raise ValueError("CAS_FILE_IMMUTABLE_FIELD")
+        if expected_owner_user_id is not None and not expected_blob_id:
+            raise ValueError("CAS_MISSING_EXPECTED_FILE_BLOB")
+        predicates = [
+            FileAssetRecord.id == file_id,
+            FileAssetRecord.revision == expected_revision,
+            FileAssetRecord.state == expected_state,
+        ]
+        if expected_owner_user_id is not None:
+            predicates.append(
+                FileAssetRecord.owner_user_id == expected_owner_user_id
+            )
+            predicates.append(FileAssetRecord.blob_id == expected_blob_id)
         next_values = dict(values)
         next_values["revision"] = expected_revision + 1
         result = await self.session.execute(
             update(FileAssetRecord)
-            .where(
-                FileAssetRecord.id == file_id,
-                FileAssetRecord.revision == expected_revision,
-                FileAssetRecord.state == expected_state,
-            )
+            .where(*predicates)
             .values(**next_values)
             .returning(FileAssetRecord)
         )
