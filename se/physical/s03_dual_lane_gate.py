@@ -74,6 +74,19 @@ def read_junit(path: Path, *, allow_skips: bool) -> set[str]:
     return set(names)
 
 
+def verify_physical_output(path: Path) -> None:
+    """JUnit cannot reveal a non-strict XPASS; terminal summary must veto it."""
+    require(path.is_file(), f"Missing physical pytest terminal output: {path}")
+    output = re.sub(r"\x1b\\[[0-9;]*m", "", path.read_text(encoding="utf-8"))
+    summaries = [line.strip() for line in output.splitlines()
+                 if re.search(r"\\b\\d+\\s+passed\\b", line) and " in " in line]
+    require(len(summaries) == 1, "Missing/ambiguous physical pytest summary")
+    summary = summaries[0]
+    require(re.search(r"^9 passed\\b", summary) is not None, "Physical test count not exactly nine passed")
+    require(re.search(r"\\b[1-9]\\d*\\s+(?:xpassed|xfailed|skipped|failed|errors?)\\b", summary)
+            is None, f"Physical pytest abnormal outcome: {summary}")
+
+
 def verify_physical(path: Path) -> None:
     actual = read_junit(path, allow_skips=False)
     expected = PHYSICAL | {RECOVERY}
@@ -106,8 +119,9 @@ def verify_contract() -> None:
         require(output == sha, f"Frozen security oracle modified: {name}")
 
 
-def verify_run(physical: Path, portable: Path, physical_head: Path,
-               portable_head: Path, expected_head: str, needs_json: str) -> None:
+def verify_run(physical: Path, portable: Path, physical_output: Path,
+               physical_head: Path, portable_head: Path,
+               expected_head: str, needs_json: str) -> None:
     require(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "Missing exact SHA")
     actual_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     require(actual_head == expected_head, "Verification checkout SHA mismatch")
@@ -121,6 +135,7 @@ def verify_run(physical: Path, portable: Path, physical_head: Path,
                 "Stale or missing job SHA attestation")
     verify_contract()
     verify_physical(physical)
+    verify_physical_output(physical_output)
     verify_portable(portable)
 
 
@@ -128,10 +143,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--physical", type=Path, required=True)
     parser.add_argument("--portable", type=Path, required=True)
+    parser.add_argument("--physical-output", type=Path, required=True)
     parser.add_argument("--physical-head", type=Path, required=True)
     parser.add_argument("--portable-head", type=Path, required=True)
     args = parser.parse_args()
-    verify_run(args.physical, args.portable, args.physical_head, args.portable_head,
+    verify_run(args.physical, args.portable, args.physical_output,
+               args.physical_head, args.portable_head,
                os.environ["EXPECTED_HEAD"], os.environ["NEEDS_JSON"])
     print("S03_DUAL_LANE_PROOF PASS (exact-head, nine physical oracles, portable JUnit)")
 

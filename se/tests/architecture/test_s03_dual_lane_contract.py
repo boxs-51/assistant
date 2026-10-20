@@ -5,7 +5,7 @@ import pytest
 
 from se.physical.s03_dual_lane_gate import (
     PHYSICAL, RECOVERY, verify_contract, verify_physical, verify_portable,
-    read_junit, require,
+    read_junit, require, verify_physical_output,
 )
 
 
@@ -57,3 +57,20 @@ def test_dual_lane_portable_cannot_claim_eight_physical_cases(tmp_path):
     with pytest.raises(AssertionError):
         verify_portable(_write(tmp_path, cases))
     assert len(PHYSICAL) == 8 and len(cases) == 9
+
+
+
+def test_dual_lane_rejects_false_junit_green_from_nonstrict_xpass(tmp_path):
+    """Reproduced with pytest 9.0.2: XPASS has tests=1, failures=0, skipped=0."""
+    output = tmp_path / "terminal.txt"
+    output.write_text("8 passed, 1 xpassed, 64 deselected in 1.23s\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        verify_physical_output(output)
+    output.write_text("9 passed, 64 deselected, 2 warnings in 3.14s\n", encoding="utf-8")
+    verify_physical_output(output)
+    output.write_text("9 passed, 1 xfailed, 64 deselected in 3.14s\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        verify_physical_output(output)
+    output.write_text("9 passed, 1 skipped in 3.14s\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        verify_physical_output(output)

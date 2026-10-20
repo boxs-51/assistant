@@ -89,7 +89,10 @@ jobs:
           )
           PY
       - name: PG17 populated history owner negative matrix
-        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py se/physical/s03_pg17_recovery.py -k "pg17 or postgresql or template_copy" --junitxml=s03-pg17-owner-raw.xml
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q -ra -o xfail_strict=true se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py se/physical/s03_pg17_recovery.py -k "pg17 or postgresql or template_copy" --junitxml=s03-pg17-owner-raw.xml | tee s03-pg17-pytest.log
       - name: Capture PG17 checkout attestation
         if: always()
         run: git rev-parse HEAD > s03-pg17-head.txt
@@ -100,6 +103,7 @@ jobs:
           path: |
             s03-pg17-owner-raw.xml
             s03-pg17-head.txt
+            s03-pg17-pytest.log
           if-no-files-found: warn
           retention-days: 7
 
@@ -179,5 +183,6 @@ jobs:
           python se/physical/s03_dual_lane_gate.py
           --physical proof/pg17/s03-pg17-owner-raw.xml
           --portable proof/portable/s03-portable-owner-raw.xml
+          --physical-output proof/pg17/s03-pg17-pytest.log
           --physical-head proof/pg17/s03-pg17-head.txt
           --portable-head proof/portable/s03-portable-head.txt
