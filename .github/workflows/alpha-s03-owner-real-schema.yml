@@ -37,13 +37,18 @@ jobs:
       - name: Attest exact HEAD
         run: python -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['EXPECTED_HEAD']"
       - name: Real SQLite owner retention FK OFF ON and recursive OFF ON
-        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_ubq_owner_rekey_fkoff_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py se/tests/integration/test_alpha_s03_owner_recovery.py -k "not pg17 and not postgresql" --junitxml=s03-sqlite-owner-raw.xml
+        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_ubq_owner_rekey_fkoff_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py se/tests/integration/test_alpha_s03_owner_recovery.py -k "not pg17 and not postgresql" -o xfail_strict=true --junitxml=s03-sqlite-owner-raw.xml
+      - name: Capture SQLite exact HEAD attestation
+        if: always()
+        run: git rev-parse HEAD > s03-sqlite-head.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: s03-owner-sqlite-${{ matrix.os }}-raw
-          path: s03-sqlite-owner-raw.xml
-          if-no-files-found: warn
+          path: |
+            s03-sqlite-owner-raw.xml
+            s03-sqlite-head.txt
+          if-no-files-found: error
           retention-days: 7
 
   pg17-owner-matrix:
@@ -180,6 +185,16 @@ jobs:
         with:
           name: s03-owner-portable-linux-raw
           path: proof/portable
+      - name: Download same-run Linux SQLite physical JUnit and attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: s03-owner-sqlite-ubuntu-24.04-raw
+          path: proof/sqlite-linux
+      - name: Download same-run Windows SQLite physical JUnit and attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: s03-owner-sqlite-windows-2022-raw
+          path: proof/sqlite-windows
       - name: Fail-closed exact-head oracle and JUnit proof
         run: >-
           python se/physical/s03_dual_lane_gate.py
@@ -189,3 +204,7 @@ jobs:
           --portable-output proof/portable/s03-portable-pytest.log
           --physical-head proof/pg17/s03-pg17-head.txt
           --portable-head proof/portable/s03-portable-head.txt
+          --sqlite-linux proof/sqlite-linux/s03-sqlite-owner-raw.xml
+          --sqlite-windows proof/sqlite-windows/s03-sqlite-owner-raw.xml
+          --sqlite-linux-head proof/sqlite-linux/s03-sqlite-head.txt
+          --sqlite-windows-head proof/sqlite-windows/s03-sqlite-head.txt

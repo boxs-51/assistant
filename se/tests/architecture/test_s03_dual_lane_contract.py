@@ -5,7 +5,8 @@ import pytest
 
 from se.physical.s03_dual_lane_gate import (
     PHYSICAL, RECOVERY, verify_contract, verify_physical, verify_portable,
-    read_junit, require, verify_physical_output,
+    read_junit, require, verify_physical_output, verify_sqlite,
+    _node_ids_sha256, SQLITE_EXPECTED_CASES,
 )
 
 
@@ -138,3 +139,57 @@ def test_junit_xpass_word_in_identity_is_not_a_result(tmp_path):
         with pytest.raises(AssertionError, match="Xfail/xpass status"):
             read_junit(path, allow_skips=False)
         del case.attrib[status_key]
+
+def test_s03_portable_skip_swap_rejected_even_if_totals_equal(tmp_path):
+    nodes = [
+        "se/tests/architecture/test_a.py::test_existing_skip",
+        "se/tests/architecture/test_b.py::test_secure_oracle",
+        "se/tests/architecture/test_c.py::test_other",
+    ]
+    path = _write(tmp_path, nodes)
+    tree = ET.parse(path)
+    suite = tree.getroot()
+    suite.set("skipped", "1")
+    cases = suite.findall("testcase")
+    ET.SubElement(cases[0], "skipped", {"message": "accepted historic skip"})
+    tree.write(path, encoding="utf-8")
+    original_digest = _node_ids_sha256({nodes[0]})
+    assert read_junit(path, allow_skips=True, expected_skips_sha256=original_digest) == set(nodes)
+
+    cases[0].remove(cases[0].find("skipped"))
+    ET.SubElement(cases[1], "skipped", {"message": "security oracle silently skipped"})
+    tree.write(path, encoding="utf-8")
+    with pytest.raises(AssertionError, match="skipped testcase identity drift"):
+        read_junit(path, allow_skips=True, expected_skips_sha256=original_digest)
+
+
+def test_s03_sqlite_identity_and_real_skips_are_fail_closed(tmp_path, monkeypatch):
+    import se.physical.s03_dual_lane_gate as gate
+
+    nodes = [
+        "se/tests/integration/test_owner.py::test_fkoff_negative",
+        "se/tests/integration/test_owner.py::test_recursiveoff_negative",
+        "se/tests/integration/test_owner.py::test_recovery_negative",
+    ]
+    monkeypatch.setattr(gate, "SQLITE_EXPECTED_CASES", len(nodes))
+    monkeypatch.setattr(gate, "SQLITE_NODE_IDS_SHA256", _node_ids_sha256(set(nodes)))
+    path = _write(tmp_path, nodes)
+    verify_sqlite(path)
+    tree = ET.parse(path)
+    suite = tree.getroot()
+    suite.findall("testcase")[0].set("name", "test_replaced_fake")
+    tree.write(path, encoding="utf-8")
+    with pytest.raises(AssertionError, match="SQLite physical testcase identity drift"):
+        verify_sqlite(path)
+
+    suite.findall("testcase")[0].set("name", "test_fkoff_negative")
+    suite.set("skipped", "1")
+    ET.SubElement(suite.findall("testcase")[1], "skipped", {"message": "unsafe bypass"})
+    tree.write(path, encoding="utf-8")
+    with pytest.raises(AssertionError, match="JUnit skipped"):
+        verify_sqlite(path)
+
+    suite.set("skipped", "0")
+    suite.findall("testcase")[1].remove(suite.findall("testcase")[1].find("skipped"))
+    tree.write(path, encoding="utf-8")
+    verify_sqlite(path)

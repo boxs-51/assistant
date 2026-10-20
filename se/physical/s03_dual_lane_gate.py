@@ -6,6 +6,7 @@ trusted review/approval must be enforced outside PR-mutable workflow contents.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -50,7 +51,8 @@ def _node(case: ET.Element) -> str:
     return classname.replace(".", "/") + ".py::" + name
 
 
-def read_junit(path: Path, *, allow_skips: bool, unrepresented_subtests: int = 0) -> set[str]:
+def read_junit(path: Path, *, allow_skips: bool, unrepresented_subtests: int = 0,
+               expected_skips_sha256: str | None = None) -> set[str]:
     require(path.is_file(), f"Missing JUnit artifact: {path}")
     root = ET.parse(path).getroot()
     require(root.tag in ("testsuite", "testsuites"), "Unexpected JUnit root")
@@ -85,6 +87,10 @@ def read_junit(path: Path, *, allow_skips: bool, unrepresented_subtests: int = 0
             for key, value in case.attrib.items()
             if key not in {"name", "classname"}
         ), "Xfail/xpass status")
+    if expected_skips_sha256 is not None:
+        skipped_nodes = [_node(case) for case in cases if case.find("skipped") is not None]
+        require(_node_ids_sha256(skipped_nodes) == expected_skips_sha256,
+                "Portable skipped testcase identity drift")
     return set(names)
 
 
@@ -107,6 +113,17 @@ def verify_physical_output(path: Path) -> None:
 # same-run pytest output instead of silently ignoring JUnit totals.
 PORTABLE_SUBTEST_BASELINE = 164
 PORTABLE_SKIP_BASELINE = 62
+# Exact passing c47d580 JUnit artifact #12275336594: frozen 62 skipped node IDs.
+# This belongs in an externally protected trust anchor for authoritative admission.
+PORTABLE_SKIP_IDS_SHA256 = "35bad6c4444a0d8a958cad08de252dafb5e1882fd291aff91b08df76eab60c02"
+# Linux artifact #12275116382 and Windows #12274251593 agree on these 85 IDs.
+SQLITE_NODE_IDS_SHA256 = "78f96857dd55b8a1d40f2cd831cc145afa3f105965c6c472aaf14d0b7e6f0cb0"
+SQLITE_EXPECTED_CASES = 85
+
+
+def _node_ids_sha256(nodes: set[str] | list[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(nodes)).encode("utf-8")).hexdigest()
+
 
 
 def read_portable_summary(path: Path) -> tuple[int, int, int]:
@@ -135,10 +152,18 @@ def verify_physical(path: Path) -> None:
     require(actual == expected, f"Physical case drift: missing={sorted(expected-actual)}, extra={sorted(actual-expected)}")
 
 
+def verify_sqlite(path: Path) -> None:
+    actual = read_junit(path, allow_skips=False)
+    require(len(actual) == SQLITE_EXPECTED_CASES, "SQLite physical case count drift")
+    require(_node_ids_sha256(actual) == SQLITE_NODE_IDS_SHA256,
+            "SQLite physical testcase identity drift")
+
+
 def verify_portable(path: Path, output: Path | None = None) -> None:
     require(output is not None, "Missing portable pytest terminal witness")
     passed, skipped, subtests = read_portable_summary(output)
-    actual = read_junit(path, allow_skips=True, unrepresented_subtests=subtests)
+    actual = read_junit(path, allow_skips=True, unrepresented_subtests=subtests,
+                        expected_skips_sha256=PORTABLE_SKIP_IDS_SHA256)
     require(len(actual) == passed + skipped, "Portable JUnit/terminal case count mismatch")
     require(len(actual) >= 4500, f"Portable suite unexpectedly small: {len(actual)}")
     require(not actual.intersection(PHYSICAL), "Portable suite reran PG17 without real PG17")
@@ -159,6 +184,12 @@ def verify_contract() -> None:
     require("image: postgres:17-alpine" in owner, "Real PG17 removed")
     require("Attest exact HEAD and disposable PG17" in owner, "Physical HEAD attestation missing")
     require("s03-dual-lane-proof:" in owner and "if: always()" in owner, "Fail-closed gate missing")
+    sqlite_step = owner.split("name: Real SQLite owner retention FK OFF ON and recursive OFF ON", 1)
+    require(len(sqlite_step) == 2 and "-o xfail_strict=true" in sqlite_step[1].split("- uses: actions/upload-artifact", 1)[0],
+            "SQLite physical strict XPASS gate missing")
+    for artifact in ("s03-owner-sqlite-ubuntu-24.04-raw", "s03-owner-sqlite-windows-2022-raw"):
+        require(owner.count("name: " + artifact) == 1 and artifact in owner,
+                f"Missing same-run SQLite download: {artifact}")
     for name, sha in SOURCE_BLOBS.items():
         output = subprocess.check_output(["git", "hash-object", name], cwd=ROOT, text=True).strip()
         require(output == sha, f"Frozen security oracle modified: {name}")
@@ -166,7 +197,10 @@ def verify_contract() -> None:
 
 def verify_run(physical: Path, portable: Path, physical_output: Path,
                portable_output: Path, physical_head: Path, portable_head: Path,
-               expected_head: str, needs_json: str) -> None:
+               expected_head: str, needs_json: str, *,
+               sqlite_linux: Path | None = None, sqlite_windows: Path | None = None,
+               sqlite_linux_head: Path | None = None,
+               sqlite_windows_head: Path | None = None) -> None:
     require(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "Missing exact SHA")
     actual_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     require(actual_head == expected_head, "Verification checkout SHA mismatch")
@@ -175,13 +209,18 @@ def verify_run(physical: Path, portable: Path, physical_output: Path,
             "Required CI dependencies removed")
     require(all(value.get("result") == "success" for value in states.values()),
             "One or more required jobs absent/failed/skipped/cancelled")
-    for attestation in (physical_head, portable_head):
-        require(attestation.is_file() and attestation.read_text().strip() == expected_head,
+    require(all(path is not None for path in
+                (sqlite_linux, sqlite_windows, sqlite_linux_head, sqlite_windows_head)),
+            "Missing required two-OS SQLite proof inputs")
+    for attestation in (physical_head, portable_head, sqlite_linux_head, sqlite_windows_head):
+        require(attestation.is_file() and attestation.read_text(encoding="utf-8-sig").strip() == expected_head,
                 "Stale or missing job SHA attestation")
     verify_contract()
     verify_physical(physical)
     verify_physical_output(physical_output)
     verify_portable(portable, portable_output)
+    verify_sqlite(sqlite_linux)
+    verify_sqlite(sqlite_windows)
 
 
 def main() -> None:
@@ -192,11 +231,18 @@ def main() -> None:
     parser.add_argument("--portable-output", type=Path, required=True)
     parser.add_argument("--physical-head", type=Path, required=True)
     parser.add_argument("--portable-head", type=Path, required=True)
+    parser.add_argument("--sqlite-linux", type=Path, required=True)
+    parser.add_argument("--sqlite-windows", type=Path, required=True)
+    parser.add_argument("--sqlite-linux-head", type=Path, required=True)
+    parser.add_argument("--sqlite-windows-head", type=Path, required=True)
     args = parser.parse_args()
     verify_run(args.physical, args.portable, args.physical_output,
                args.portable_output, args.physical_head, args.portable_head,
-               os.environ["EXPECTED_HEAD"], os.environ["NEEDS_JSON"])
-    print("S03_DUAL_LANE_PROOF PASS (exact-head, nine physical oracles, portable JUnit)")
+               os.environ["EXPECTED_HEAD"], os.environ["NEEDS_JSON"],
+               sqlite_linux=args.sqlite_linux, sqlite_windows=args.sqlite_windows,
+               sqlite_linux_head=args.sqlite_linux_head,
+               sqlite_windows_head=args.sqlite_windows_head)
+    print("S03_DUAL_LANE_PROOF PASS (exact-head, nine PG17, 85+85 SQLite, portable JUnit)")
 
 
 if __name__ == "__main__":
