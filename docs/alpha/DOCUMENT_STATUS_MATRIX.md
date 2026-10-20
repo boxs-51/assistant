@@ -1,3 +1,7 @@
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:START -->
+> **RETIRED / NON-NORMATIVE historical governance.** Policy #85 is no longer in effect. Technical P0/P1/HOLD findings, existing security guards and test expectations remain independently binding where applicable; this document cannot reactivate retired procedural instructions or authorize merge/deployment.
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:END -->
+
 # PDRM v1.0: document provenance and reconciliation for alpha
 
 **Assessment baseline:** alpha@76842cf56f40faab3083c6de390373ef56fb65f2, 2026-10-19. Inventory contains 233 docs paths; representative high-risk contracts were read deeply. **NOT** a 233-file line-by-line certification. No retroactive change to source approvals or release authority.
