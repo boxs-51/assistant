@@ -77,13 +77,13 @@ def read_junit(path: Path, *, allow_skips: bool) -> set[str]:
 def verify_physical_output(path: Path) -> None:
     """JUnit cannot reveal a non-strict XPASS; terminal summary must veto it."""
     require(path.is_file(), f"Missing physical pytest terminal output: {path}")
-    output = re.sub(r"\x1b\\[[0-9;]*m", "", path.read_text(encoding="utf-8"))
+    output = re.sub(r"\x1b\[[0-9;]*m", "", path.read_text(encoding="utf-8"))
     summaries = [line.strip() for line in output.splitlines()
-                 if re.search(r"\\b\\d+\\s+passed\\b", line) and " in " in line]
+                 if re.search(r"\b\d+\s+passed\b", line) and " in " in line]
     require(len(summaries) == 1, "Missing/ambiguous physical pytest summary")
     summary = summaries[0]
-    require(re.search(r"^9 passed\\b", summary) is not None, "Physical test count not exactly nine passed")
-    require(re.search(r"\\b[1-9]\\d*\\s+(?:xpassed|xfailed|skipped|failed|errors?)\\b", summary)
+    require(re.search(r"^9 passed\b", summary) is not None, "Physical test count not exactly nine passed")
+    require(re.search(r"\b[1-9]\d*\s+(?:xpassed|xfailed|skipped|failed|errors?)\b", summary)
             is None, f"Physical pytest abnormal outcome: {summary}")
 
 
