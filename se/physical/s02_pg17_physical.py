@@ -88,8 +88,8 @@ def test_s02_pg17_merges_both_populated_histories_without_privilege_gain(
             await conn.close()
 
     prior_grants = asyncio.run(seed())
-    command.upgrade(cfg, "head")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, MERGE)
+    command.upgrade(cfg, MERGE)
 
     async def check():
         conn = await asyncpg.connect(**_conn_params(dbname))
