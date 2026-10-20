@@ -186,7 +186,7 @@ def test_s03_sqlite_identity_and_real_skips_are_fail_closed(tmp_path, monkeypatc
     suite.set("skipped", "1")
     ET.SubElement(suite.findall("testcase")[1], "skipped", {"message": "unsafe bypass"})
     tree.write(path, encoding="utf-8")
-    with pytest.raises(AssertionError, match="JUnit skipped"):
+    with pytest.raises(AssertionError, match="Physical testcase skipped"):
         verify_sqlite(path)
 
     suite.set("skipped", "0")
