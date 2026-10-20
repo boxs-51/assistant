@@ -77,8 +77,15 @@ def test_dual_lane_rejects_false_junit_green_from_nonstrict_xpass(tmp_path):
         verify_physical_output(output)
 
 
-def test_portable_junit_counts_real_pytest_subtests_without_weakening_total(tmp_path):
-    """pytest reported 4459 PASS + 62 SKIP + 164 passing subtests at frozen RED."""
+def test_portable_junit_counts_real_pytest_subtests_without_weakening_total(tmp_path, monkeypatch):
+    """Synthetic JUnit case count proof with its own synthetic skip identity set."""
+    import se.physical.s03_dual_lane_gate as gate
+
+    # This unit fixture has fake IDs; patch only its fixture digest, never the
+    # production frozen hash that is checked against real same-run JUnit.
+    fixture_skips = {f"se/tests/integration/synthetic.py::test_regular_{i}" for i in range(62)}
+    monkeypatch.setattr(gate, "PORTABLE_SKIP_IDS_SHA256",
+                        gate._node_ids_sha256(fixture_skips))
     cases = [f"se/tests/integration/synthetic.py::test_regular_{n}" for n in range(4521)]
     path = _write(tmp_path, cases)
     tree = ET.parse(path)
@@ -186,7 +193,7 @@ def test_s03_sqlite_identity_and_real_skips_are_fail_closed(tmp_path, monkeypatc
     suite.set("skipped", "1")
     ET.SubElement(suite.findall("testcase")[1], "skipped", {"message": "unsafe bypass"})
     tree.write(path, encoding="utf-8")
-    with pytest.raises(AssertionError, match="Physical testcase skipped"):
+    with pytest.raises(AssertionError, match="Physical skipped tests"):
         verify_sqlite(path)
 
     suite.set("skipped", "0")
