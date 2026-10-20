@@ -1,0 +1,94 @@
+name: Alpha S03 Owner Integrity Real Schema RED-first
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-owner-matrix:
+    name: SQLite CTX CAS UBQ owner negatives / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Attest exact HEAD
+        run: python -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['EXPECTED_HEAD']"
+      - name: Real SQLite owner retention FK OFF ON and recursive OFF ON
+        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_ubq_owner_rekey_fkoff_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py -k "not pg17 and not postgresql" --junitxml=s03-sqlite-owner-raw.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s03-owner-sqlite-${{ matrix.os }}-raw
+          path: s03-sqlite-owner-raw.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+  pg17-owner-matrix:
+    name: PG17 real schema CTX CAS cross-owner / Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: s03_ci
+          POSTGRES_DB: s03_migration_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U s03_ci -d s03_migration_ci"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://s03_ci@127.0.0.1:5432/s03_migration_ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Attest exact HEAD and disposable PG17
+        run: |
+          python - <<'PY'
+          import os, subprocess
+          from sqlalchemy.engine import make_url
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == os.environ['EXPECTED_HEAD']
+          u = make_url(os.environ['AIC_TEST_POSTGRES_URL'])
+          assert (u.drivername,u.host,u.port,u.username,u.database,u.password) == (
+              'postgresql+asyncpg','127.0.0.1',5432,'s03_ci','s03_migration_ci',None
+          )
+          PY
+      - name: PG17 populated history owner negative matrix
+        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py -k "pg17 or postgresql" --junitxml=s03-pg17-owner-raw.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s03-owner-pg17-linux-raw
+          path: s03-pg17-owner-raw.xml
+          if-no-files-found: warn
+          retention-days: 7
