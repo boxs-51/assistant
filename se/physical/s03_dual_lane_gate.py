@@ -50,12 +50,15 @@ def _node(case: ET.Element) -> str:
     return classname.replace(".", "/") + ".py::" + name
 
 
-def read_junit(path: Path, *, allow_skips: bool) -> set[str]:
+def read_junit(path: Path, *, allow_skips: bool, unrepresented_subtests: int = 0) -> set[str]:
     require(path.is_file(), f"Missing JUnit artifact: {path}")
     root = ET.parse(path).getroot()
     require(root.tag in ("testsuite", "testsuites"), "Unexpected JUnit root")
     suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
     require(bool(suites), "No JUnit test suites")
+    require(unrepresented_subtests >= 0, "Invalid subtest accounting")
+    if unrepresented_subtests:
+        require(allow_skips and len(suites) == 1, "Ambiguous subtest accounting")
     cases = [case for suite in suites for case in suite.findall("testcase")]
     names = [_node(case) for case in cases]
     require(len(names) == len(set(names)), "Duplicate JUnit testcase")
@@ -63,7 +66,11 @@ def read_junit(path: Path, *, allow_skips: bool) -> set[str]:
     for suite in suites:
         for key in ("errors", "failures"):
             require(int(suite.attrib.get(key, "-1")) == 0, f"JUnit {key} not zero")
-        require(int(suite.attrib.get("tests", "-1")) == len(suite.findall("testcase")), "JUnit case count mismatch")
+        expected_tests = len(suite.findall("testcase")) + unrepresented_subtests
+        require(int(suite.attrib.get("tests", "-1")) == expected_tests, "JUnit case count mismatch")
+        require(int(suite.attrib.get("skipped", "-1")) == sum(
+            case.find("skipped") is not None for case in suite.findall("testcase")
+        ), "JUnit skipped case count mismatch")
         if not allow_skips:
             require(int(suite.attrib.get("skipped", "-1")) == 0, "Physical skipped tests")
     for case in cases:
@@ -87,14 +94,45 @@ def verify_physical_output(path: Path) -> None:
             is None, f"Physical pytest abnormal outcome: {summary}")
 
 
+
+# pytest-subtests contributes to testsuite@tests but does not serialize each
+# passing subtest as a standalone <testcase>. Bind the difference to captured
+# same-run pytest output instead of silently ignoring JUnit totals.
+PORTABLE_SUBTEST_BASELINE = 164
+PORTABLE_SKIP_BASELINE = 62
+
+
+def read_portable_summary(path: Path) -> tuple[int, int, int]:
+    require(path.is_file(), f"Missing portable pytest output: {path}")
+    output = re.sub(r"\x1b\[[0-9;]*m", "", path.read_text(encoding="utf-8"))
+    summaries = [line.strip() for line in output.splitlines()
+                 if re.search(r"^\d+ passed\b", line.strip()) and " in " in line]
+    require(len(summaries) == 1, "Missing/ambiguous portable pytest summary")
+    summary = summaries[0]
+    require(re.search(r"\b[1-9]\d*\s+(?:failed|errors?|xpassed|xfailed|reruns?)\b", summary)
+            is None, f"Portable pytest abnormal outcome: {summary}")
+    passed = re.match(r"^(\d+) passed\b", summary)
+    skipped = re.search(r"\b(\d+) skipped\b", summary)
+    subtests = re.search(r"\b(\d+) subtests passed\b", summary)
+    require(passed is not None and skipped is not None and subtests is not None,
+            "Incomplete portable pytest accounting")
+    values = int(passed.group(1)), int(skipped.group(1)), int(subtests.group(1))
+    require(values[1] <= PORTABLE_SKIP_BASELINE, "New portable skipped tests")
+    require(values[2] >= PORTABLE_SUBTEST_BASELINE, "Missing portable subtest coverage")
+    return values
+
+
 def verify_physical(path: Path) -> None:
     actual = read_junit(path, allow_skips=False)
     expected = PHYSICAL | {RECOVERY}
     require(actual == expected, f"Physical case drift: missing={sorted(expected-actual)}, extra={sorted(actual-expected)}")
 
 
-def verify_portable(path: Path) -> None:
-    actual = read_junit(path, allow_skips=True)
+def verify_portable(path: Path, output: Path | None = None) -> None:
+    require(output is not None, "Missing portable pytest terminal witness")
+    passed, skipped, subtests = read_portable_summary(output)
+    actual = read_junit(path, allow_skips=True, unrepresented_subtests=subtests)
+    require(len(actual) == passed + skipped, "Portable JUnit/terminal case count mismatch")
     require(len(actual) >= 4500, f"Portable suite unexpectedly small: {len(actual)}")
     require(not actual.intersection(PHYSICAL), "Portable suite reran PG17 without real PG17")
     require(RECOVERY not in actual, "Recovery executed in portable suite")
@@ -120,7 +158,7 @@ def verify_contract() -> None:
 
 
 def verify_run(physical: Path, portable: Path, physical_output: Path,
-               physical_head: Path, portable_head: Path,
+               portable_output: Path, physical_head: Path, portable_head: Path,
                expected_head: str, needs_json: str) -> None:
     require(re.fullmatch(r"[0-9a-f]{40}", expected_head) is not None, "Missing exact SHA")
     actual_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -136,7 +174,7 @@ def verify_run(physical: Path, portable: Path, physical_output: Path,
     verify_contract()
     verify_physical(physical)
     verify_physical_output(physical_output)
-    verify_portable(portable)
+    verify_portable(portable, portable_output)
 
 
 def main() -> None:
@@ -144,11 +182,12 @@ def main() -> None:
     parser.add_argument("--physical", type=Path, required=True)
     parser.add_argument("--portable", type=Path, required=True)
     parser.add_argument("--physical-output", type=Path, required=True)
+    parser.add_argument("--portable-output", type=Path, required=True)
     parser.add_argument("--physical-head", type=Path, required=True)
     parser.add_argument("--portable-head", type=Path, required=True)
     args = parser.parse_args()
     verify_run(args.physical, args.portable, args.physical_output,
-               args.physical_head, args.portable_head,
+               args.portable_output, args.physical_head, args.portable_head,
                os.environ["EXPECTED_HEAD"], os.environ["NEEDS_JSON"])
     print("S03_DUAL_LANE_PROOF PASS (exact-head, nine physical oracles, portable JUnit)")
 

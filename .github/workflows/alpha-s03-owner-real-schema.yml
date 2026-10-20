@@ -125,8 +125,9 @@ jobs:
       - name: Attest exact HEAD
         run: python -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['EXPECTED_HEAD']"
       - name: Full portable Architecture Linux with exact PG17 case handoff
+        shell: bash
         run: >-
-          python -m pytest -q
+          set -o pipefail; python -m pytest -q
           --ignore=se/tests/integration/test_ae359_utc_naive_pg17_redfirst.py
           --ignore=se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py
           --ignore=se/tests/integration/test_ae359_post_ack_loss_physical.py
@@ -138,7 +139,7 @@ jobs:
           --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[child_first-REKEY]
           --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[parent_first-DELETE]
           --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[parent_first-REKEY]
-          --junitxml=s03-portable-owner-raw.xml
+          --junitxml=s03-portable-owner-raw.xml | tee s03-portable-pytest.log
       - name: Capture checkout attestation
         if: always()
         run: git rev-parse HEAD > s03-portable-head.txt
@@ -149,6 +150,7 @@ jobs:
           path: |
             s03-portable-owner-raw.xml
             s03-portable-head.txt
+            s03-portable-pytest.log
           if-no-files-found: error
           retention-days: 7
 
@@ -184,5 +186,6 @@ jobs:
           --physical proof/pg17/s03-pg17-owner-raw.xml
           --portable proof/portable/s03-portable-owner-raw.xml
           --physical-output proof/pg17/s03-pg17-pytest.log
+          --portable-output proof/portable/s03-portable-pytest.log
           --physical-head proof/pg17/s03-pg17-head.txt
           --portable-head proof/portable/s03-portable-head.txt
