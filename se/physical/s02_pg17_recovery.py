@@ -38,7 +38,7 @@ def interrupt(conn, cursor, statement, parameters, context, executemany):
 root = Path(os.environ["S02_REPO_ROOT"])
 cfg = Config(str(root / "alembic.ini"))
 cfg.set_main_option("script_location", str(root / "se/src/infrastructure/storage/migrations/sql"))
-command.upgrade(cfg, "head")
+command.upgrade(cfg, "32a_alpha_31b_31t_merge")
 raise SystemExit(99)
 """
 
@@ -143,12 +143,12 @@ def test_s02_pg17_copy_recovery_without_role_grants(monkeypatch, case):
         assert asyncio.run(_versions(db)) == {AIC}
         _verify(db, grants, permission=0)
         assert asyncio.run(_versions("s02_migration_ci")) == {AIC}
-        command.upgrade(cfg, "head")
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "32a_alpha_31b_31t_merge")
+        command.upgrade(cfg, "32a_alpha_31b_31t_merge")
         assert asyncio.run(_versions(db)) == {MERGE}
         _verify(db, grants, permission=1)
     else:
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "32a_alpha_31b_31t_merge")
         assert asyncio.run(_versions(db)) == {MERGE}
         _verify(db, grants, permission=1)
         # Revision 31b strictly forbids downgrade: only merge-marker rollback.
@@ -158,6 +158,6 @@ def test_s02_pg17_copy_recovery_without_role_grants(monkeypatch, case):
         command.downgrade(cfg, AIC)
         assert asyncio.run(_versions(db)) == {AIC, TERMINAL}
         _verify(db, grants, permission=1)
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "32a_alpha_31b_31t_merge")
         assert asyncio.run(_versions(db)) == {MERGE}
         _verify(db, grants, permission=1)
