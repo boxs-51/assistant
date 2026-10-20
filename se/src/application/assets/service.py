@@ -176,6 +176,13 @@ class AssetService:
                     raise AssetStateError(
                         f"Asset {asset_id} is not STAGING@0"
                     )
+                if (
+                    file_record.owner_user_id != owner_user_id
+                    or file_record.blob_id != blob_id
+                ):
+                    raise AssetFinalizeError(
+                        "Canonical asset owner or blob drifted before finalize"
+                    )
                 if blob_record.state != "STAGING":
                     raise AssetStateError(
                         f"Blob {blob_id} is not STAGING"
@@ -192,6 +199,8 @@ class AssetService:
                     asset_id,
                     expected_revision=0,
                     expected_state="STAGING",
+                    expected_owner_user_id=owner_user_id,
+                    expected_blob_id=blob_id,
                     values={"state": "READY"},
                 )
                 if winner is None:
