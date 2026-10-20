@@ -1035,10 +1035,12 @@ def test_ctx_f5_2_migration_is_linear_and_upgrades_downgrades_real_sqlite(
         and mh0_parents.get("896c456631dd") == ("4f_phase4_multi_agent",)
         and mh0_parents.get("5b_conversation_temporal_contract")
         == ("5a_phase5_9_execution_resume", "896c456631dd")
+        and mh0_parents.get("32a_alpha_31b_31t_merge")
+        == ("31b_aic0_pg_guard_forward", "31t_direct_terminal_permission")
         and all(
             len(parents)
             == (
-                2 if revision == "5b_conversation_temporal_contract"
+                2 if revision in ("5b_conversation_temporal_contract", "32a_alpha_31b_31t_merge")
                 else 0 if revision == "2b8eaa45108e"
                 else 1
             )
@@ -1049,7 +1051,7 @@ def test_ctx_f5_2_migration_is_linear_and_upgrades_downgrades_real_sqlite(
             sum(revision in parents for parents in mh0_parents.values())
             == (
                 0 if revision == mh0_heads[0]
-                else 2 if revision == "4f_phase4_multi_agent"
+                else 2 if revision in ("4f_phase4_multi_agent", "30a_ctx_f5_user_wide_memory_scope")
                 else 1
             )
             for revision in mh0_parents
@@ -1167,10 +1169,12 @@ def test_ctx_f5_3k_p1_migration_is_nullable_no_backfill_restrictive_and_reversib
         and mh0_parents.get("896c456631dd") == ("4f_phase4_multi_agent",)
         and mh0_parents.get("5b_conversation_temporal_contract")
         == ("5a_phase5_9_execution_resume", "896c456631dd")
+        and mh0_parents.get("32a_alpha_31b_31t_merge")
+        == ("31b_aic0_pg_guard_forward", "31t_direct_terminal_permission")
         and all(
             len(parents)
             == (
-                2 if revision == "5b_conversation_temporal_contract"
+                2 if revision in ("5b_conversation_temporal_contract", "32a_alpha_31b_31t_merge")
                 else 0 if revision == "2b8eaa45108e"
                 else 1
             )
@@ -1181,7 +1185,7 @@ def test_ctx_f5_3k_p1_migration_is_nullable_no_backfill_restrictive_and_reversib
             sum(revision in parents for parents in mh0_parents.values())
             == (
                 0 if revision == mh0_heads[0]
-                else 2 if revision == "4f_phase4_multi_agent"
+                else 2 if revision in ("4f_phase4_multi_agent", "30a_ctx_f5_user_wide_memory_scope")
                 else 1
             )
             for revision in mh0_parents

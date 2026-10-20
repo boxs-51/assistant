@@ -33,7 +33,7 @@ def upgrade() -> None:
             "WHERE NOT EXISTS ("
             "SELECT 1 FROM permissions WHERE name = :permission_name"
             ")"
-        ),
+        ).bindparams(sa.bindparam("permission_name", type_=sa.String())),
         {
             "permission_id": _PERMISSION_ID,
             "permission_name": _PERMISSION_NAME,
