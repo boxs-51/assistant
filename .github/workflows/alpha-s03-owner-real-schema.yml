@@ -32,7 +32,7 @@ jobs:
       - name: Attest exact HEAD
         run: python -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['EXPECTED_HEAD']"
       - name: Real SQLite owner retention FK OFF ON and recursive OFF ON
-        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_ubq_owner_rekey_fkoff_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py -k "not pg17 and not postgresql" --junitxml=s03-sqlite-owner-raw.xml
+        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_ubq_owner_rekey_fkoff_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py se/tests/integration/test_alpha_s03_owner_recovery.py -k "not pg17 and not postgresql" --junitxml=s03-sqlite-owner-raw.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
