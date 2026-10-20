@@ -48,8 +48,8 @@ def test_s02_sqlite_populated_history_merges_without_grants_or_owner_loss(
         # A real historical populated user is present before reconciling tips.
         assert con.execute("SELECT COUNT(*) FROM users WHERE id='s02-owner'").fetchone()[0] == 1
         before_grants = con.execute("SELECT COUNT(*) FROM role_permissions").fetchone()[0]
-    command.upgrade(cfg, "head")
-    command.upgrade(cfg, "head")  # idempotent replay at the merged tip
+    command.upgrade(cfg, MERGE)
+    command.upgrade(cfg, MERGE)  # idempotent replay at the merged tip
     with sqlite3.connect(database) as con:
         con.execute(f"PRAGMA foreign_keys={'ON' if fk_on else 'OFF'}")
         con.execute(f"PRAGMA recursive_triggers={'ON' if recursive_on else 'OFF'}")
