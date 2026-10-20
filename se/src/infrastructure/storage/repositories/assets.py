@@ -433,6 +433,15 @@ class AssetRepository:
         expected_live_claim_token: Optional[str],
         values: Mapping[str, Any],
     ) -> Optional[FileProviderBindingRecord]:
+        # The durable provider binding identity and canonical source
+        # fingerprint never change through a lifecycle compare-and-set.
+        # Deny the write before SQL, even if a caller supplied a new state.
+        immutable = {
+            "id", "file_id", "provider_name", "provider_namespace",
+            "source_blob_id", "source_sha256",
+        }
+        if immutable.intersection(values):
+            raise ValueError("CAS_PROVIDER_BINDING_IMMUTABLE_FIELD")
         predicates = [
             FileProviderBindingRecord.id == binding_id,
             FileProviderBindingRecord.revision == expected_revision,
@@ -515,6 +524,10 @@ class AssetRepository:
         expected_state: str,
         values: Mapping[str, Any],
     ) -> Optional[FileAssetRecord]:
+        # Asset identity, tenant ownership and canonical blob lineage are
+        # immutable. Caller-provided values may only advance lifecycle state.
+        if {"id", "owner_user_id", "blob_id"}.intersection(values):
+            raise ValueError("CAS_FILE_IMMUTABLE_FIELD")
         next_values = dict(values)
         next_values["revision"] = expected_revision + 1
         result = await self.session.execute(
