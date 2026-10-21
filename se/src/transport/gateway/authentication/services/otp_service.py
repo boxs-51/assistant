@@ -5,7 +5,9 @@ from typing import Callable, Optional
 import structlog
 
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
-from .....infrastructure.storage.interfaces.cache import CacheDriver, CacheWriteNotDispatched
+from .....infrastructure.storage.interfaces.cache import (
+    CacheDriver, CacheWriteNotDispatched, CacheWriteLegacyAuthorityUnknown,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -17,7 +19,7 @@ class OTPStorageService:
         self.otp_ttl = 300
         self.cooldown_ttl = 60
 
-    async def _reserve_issuance(self, email: str, purpose: str) -> bool:
+    async def _reserve_issuance(self, email: str, purpose: str) -> None:
         """Commit a cross-process SQL issuance fence before any Redis SET.
 
         This pre-dispatch commit is the authoritative first-writer claim. A
@@ -31,13 +33,10 @@ class OTPStorageService:
             if not callable(reserver):
                 if isinstance(uow, SqlAlchemyUnitOfWork):
                     raise RuntimeError("durable OTP issuance authority unavailable")
-                # Legacy fixture-only unit-of-work, never a production
-                # permission to mint an alternative Redis/SQL OTP.
-                return False
+                return
             await reserver(email, purpose, self.otp_ttl)
             # A failed/unknown COMMIT aborts issuance before touching Redis.
             await uow.commit()
-            return True
 
     async def save_pending_registration(self, email: str, user_data: dict, otp: str) -> None:
         payload_str = json.dumps({
@@ -48,19 +47,20 @@ class OTPStorageService:
         })
         # Durable first-writer reservation must COMMIT before Redis may execute.
         # On conflict or unknown COMMIT no cache/SQL dispatch is allowed.
-        durable_fence = await self._reserve_issuance(email, "registration")
+        await self._reserve_issuance(email, "registration")
         if self.cache_driver is not None:
             try:
                 await self.cache_driver.set(f"pending_reg:{email}", payload_str, self.otp_ttl)
+            except CacheWriteLegacyAuthorityUnknown:
+                # The modern SET was not dispatched, but a pre-fence legacy
+                # Redis challenge may already exist. Never mint an independent
+                # SQL OTP without a proven single authority.
+                logger.error("OTP legacy Redis authority unverified; SQL fallback denied")
+                raise
             except CacheWriteNotDispatched:
-                # "My SET did not dispatch" does NOT mean an unfenced old
-                # writer has no already-live OTP in Redis. A committed SQL
-                # issuance reservation only coordinates newer writers.
-                # Never mint a second SQL authority for a real durable UOW.
-                if durable_fence:
-                    logger.error("OTP cache pre-dispatch but legacy Redis authority unverified; SQL fallback denied")
-                    raise
-                logger.warning("OTP cache write not dispatched; using fixture-only database fallback")
+                # Genuine no-cache-authority controls retain the documented
+                # confirmed pre-dispatch SQL fallback contract.
+                logger.warning("OTP cache write not dispatched; using database fallback")
             except Exception as exc:
                 # Redis may have committed SET before its ACK was lost.
                 # Never create a second live authority for this challenge.
@@ -104,20 +104,18 @@ class OTPStorageService:
             "purpose": "password_reset",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
-        durable_fence = await self._reserve_issuance(email, "password_reset")
+        await self._reserve_issuance(email, "password_reset")
         if self.cache_driver is not None:
             try:
                 await self.cache_driver.set(
                     f"pending_password_reset:{email}", payload_str, self.otp_ttl
                 )
+            except CacheWriteLegacyAuthorityUnknown:
+                logger.error("Password-reset legacy Redis authority unverified; SQL fallback denied")
+                raise
             except CacheWriteNotDispatched:
-                # Unconnected new Redis driver cannot witness a live
-                # pre-fence legacy challenge. Deny real SQL dual authority.
-                if durable_fence:
-                    logger.error("Password-reset cache pre-dispatch but legacy Redis authority unverified; SQL fallback denied")
-                    raise
                 logger.warning(
-                    "Password-reset OTP cache write not dispatched; using fixture-only database fallback"
+                    "Password-reset OTP cache write not dispatched; using database fallback"
                 )
             except Exception as exc:
                 logger.error("Password-reset OTP cache write unconfirmed; "

@@ -5,7 +5,9 @@ from redis.exceptions import RedisError, NoScriptError
 from typing import Any, Optional, Dict
 
 from ....config.schemas import DriverConfig
-from ...interfaces.cache import CacheDriver, CacheWriteNotDispatched, CacheWriteCollision
+from ...interfaces.cache import (
+    CacheDriver, CacheWriteLegacyAuthorityUnknown, CacheWriteCollision,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -142,7 +144,9 @@ class RedisDriver(CacheDriver):
         # network write, including timeout or lost ACK, do NOT label it as
         # non-dispatched: the backend may already hold a live OTP.
         if self._client is None:
-            raise CacheWriteNotDispatched("RedisDriver is not connected; SET was not dispatched before client initialization")
+            raise CacheWriteLegacyAuthorityUnknown(
+                "RedisDriver is not connected; an earlier legacy OTP authority is unverified"
+            )
         client = self._require_client()
 
         try:
