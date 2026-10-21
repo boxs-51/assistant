@@ -81,3 +81,10 @@ class CacheWriteNotDispatched(RuntimeError):
     This signal may permit fallback to an alternate OTP authority; lying
     about pre-dispatch status creates a cross-store one-use bypass.
     """
+
+class CacheWriteCollision(RuntimeError):
+    """Atomic Redis NX reports an already-existing live cache challenge.
+
+    This is a confirmed collision, not CacheWriteNotDispatched and not a
+    fallback-authorizing cache miss. The original value must remain intact.
+    """
