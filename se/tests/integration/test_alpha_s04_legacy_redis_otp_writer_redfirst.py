@@ -474,3 +474,165 @@ def test_s04_mixed_isolated_inmemory_positive_control(purpose):
                 )
             await engine.dispose()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_acl_distinct_writer_epoch_denies_old_set(purpose):
+    """Physical Redis 7.4 ACL cutover, not a deployment approval."""
+    from redis.exceptions import ResponseError
+    from se.src.infrastructure.storage.interfaces.cache import CacheWriteCollision
+
+    async def run():
+        url, _ = _targets()
+        engine = await _pg_engines()
+        admin = redis.Redis.from_url(url, decode_responses=True)
+        uid = uuid4().hex[:16]
+        old_user, new_user = "s04_old_" + uid, "s04_new_" + uid
+        old_password, new_password = uuid4().hex, uuid4().hex
+        email = f"s04-acl-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cool = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        old = None
+        modern_driver = None
+        created = []
+        try:
+            assert await admin.ping()
+            assert str((await admin.info("server"))["redis_version"]).startswith("7.4.")
+            assert await admin.execute_command("ACL", "WHOAMI") == "default"
+            assert await admin.execute_command(
+                "ACL", "SETUSER", old_user, "reset", "on", ">" + old_password,
+                "~pending_reg:*", "~pending_password_reset:*",
+                "+ping", "+get", "+set", "+ttl"
+            )
+            created.append(old_user)
+            assert await admin.execute_command(
+                "ACL", "SETUSER", new_user, "reset", "on", ">" + new_password,
+                "~pending_reg:*", "~pending_password_reset:*",
+                "~otp_cooldown:*", "~password_reset_cooldown:*",
+                "+ping", "+get", "+getdel", "+set", "+ttl"
+            )
+            created.append(new_user)
+            old = redis.Redis(host="127.0.0.1", port=6379, db=15,
+                              username=old_user, password=old_password,
+                              decode_responses=True)
+            assert await old.ping()
+            legacy_value = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "old"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await old.set(key, legacy_value, ex=300) is True
+            modern_url = ("redis://" + new_user + ":" + new_password
+                          + "@127.0.0.1:6379/15")
+            modern_driver = await _redis_driver(modern_url)
+            with pytest.raises(CacheWriteCollision):
+                await modern_driver.set(key, "new", 300)
+            assert await admin.get(key) == legacy_value
+            # An independent admin revokes the old writer before issuing new.
+            assert await admin.execute_command(
+                "ACL", "SETUSER", old_user, "reset", "on",
+                ">" + old_password, "~pending_reg:*", "~pending_password_reset:*",
+                "+ping", "+get", "+ttl"
+            )
+            for command in (
+                ("SET", key, "late", "EX", 300),
+                ("GETSET", key, "late"),
+                ("DEL", key),
+                ("EVAL", "return 1", 0),
+                ("ACL", "SETUSER", old_user, "+set"),
+            ):
+                with pytest.raises(ResponseError, match="(?i)permission"):
+                    await old.execute_command(*command)
+            assert await admin.get(key) == legacy_value
+            # External drain: never just flush/delete old OTP without receipt.
+            assert await admin.getdel(key) == legacy_value
+            assert await admin.get(key) is None
+            modern = OTPStorageService(modern_driver, _factory(engine))
+            await getattr(modern, save)(email, {"value": "modern"}, "222222")
+            assert json.loads(await admin.get(key))["otp"] == "222222"
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old.set(key, "rollback-attempt", ex=300)
+            verifier = OTPStorageService(modern_driver, _factory(engine))
+            assert await getattr(verifier, verify)(email, "222222") == {
+                "value": "modern"
+            }
+            assert await getattr(verifier, verify)(email, "222222") is None
+            assert await getattr(verifier, verify)(email, "111111") is None
+            assert await _row_count(engine, email) == 0
+        finally:
+            if modern_driver is not None:
+                await modern_driver.disconnect()
+            if old is not None:
+                await old.aclose()
+            await admin.delete(key, cool)
+            if created:
+                await admin.execute_command("ACL", "DELUSER", *created)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await admin.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_acl_shared_credentials_rollback_hazard_control(purpose):
+    """Expected hazard: a shared Redis ACL identity cannot distinguish writers."""
+    from redis.exceptions import ResponseError
+
+    async def run():
+        url, _ = _targets()
+        engine = await _pg_engines()
+        admin = redis.Redis.from_url(url, decode_responses=True)
+        name = "s04_shared_" + uuid4().hex[:16]
+        password = uuid4().hex
+        email = f"s04-acl-shared-{uuid4().hex}@example.invalid"
+        key = ("pending_password_reset:" if purpose == "password_reset"
+               else "pending_reg:") + email
+        old, modern = None, None
+        created = False
+        try:
+            assert str((await admin.info("server"))["redis_version"]).startswith("7.4.")
+            assert await admin.execute_command(
+                "ACL", "SETUSER", name, "reset", "on", ">" + password,
+                "~pending_reg:*", "~pending_password_reset:*",
+                "+ping", "+get", "+set"
+            )
+            created = True
+            old = redis.Redis(host="127.0.0.1", port=6379, db=15,
+                              username=name, password=password, decode_responses=True)
+            modern = redis.Redis(host="127.0.0.1", port=6379, db=15,
+                                 username=name, password=password, decode_responses=True)
+            assert await modern.set(key, "modern", ex=300, nx=True) is True
+            assert await old.set(key, "old-unconditional", ex=300) is True
+            assert await admin.get(key) == "old-unconditional", (
+                "S04_ACL_HARNESS_ERROR: shared credentials hazard absent"
+            )
+            # Revoking shared SET blocks both binaries. Restoring it reopens old SET.
+            assert await admin.execute_command("ACL", "SETUSER", name, "-set")
+            for client in (old, modern):
+                with pytest.raises(ResponseError, match="(?i)permission"):
+                    await client.set(key, "denied", ex=300)
+            assert await admin.execute_command("ACL", "SETUSER", name, "+set")
+            assert await admin.set(key, "modern-new", ex=300) is True
+            assert await old.set(key, "old-rollback", ex=300) is True
+            assert await admin.get(key) == "old-rollback", (
+                "S04_ACL_HARNESS_ERROR: unsafe rollback control not reproduced"
+            )
+        finally:
+            if old is not None:
+                await old.aclose()
+            if modern is not None:
+                await modern.aclose()
+            await admin.delete(key)
+            if created:
+                await admin.execute_command("ACL", "DELUSER", name)
+            await admin.aclose()
+            await engine.dispose()
+    asyncio.run(run())

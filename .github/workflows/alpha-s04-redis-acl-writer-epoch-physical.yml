@@ -1,0 +1,126 @@
+name: Alpha S04 Redis ACL writer epoch physical boundary
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  redis-acl-epoch-pg17-redis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ae359_otp_t1
+          POSTGRES_USER: ae359_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ae359_test -d ae359_otp_t1"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      AE359_POSTACK_STRICT: "1"
+      AE359_POSTACK_PG_URL: postgresql+asyncpg://ae359_test@127.0.0.1:5432/ae359_otp_t1
+      S04_ACL_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - run: python -m pip install -r requirements-test.txt
+      - name: Attest exact SHA and disposable physical backends
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$S04_ACL_EXPECTED_SHA"
+          printf 'S04_EXACT_HEAD=%s\n' "$(git rev-parse HEAD)"
+          uri="redis$(printf '%s' '://')127.0.0.1:6379/15"
+          echo "::add-mask::$uri"
+          echo "AE359_POSTACK_REDIS_URL=$uri" >> "$GITHUB_ENV"
+          python - <<'PY'
+          from sqlalchemy.engine import make_url
+          import os
+          pg = make_url(os.environ["AE359_POSTACK_PG_URL"])
+          assert (pg.drivername, pg.host, pg.database, pg.password) == (
+              "postgresql+asyncpg", "127.0.0.1", "ae359_otp_t1", None
+          )
+          assert os.environ["AE359_POSTACK_STRICT"] == "1"
+          print("S04_ISOLATED_PG17_STRICT=PASS")
+          PY
+      - name: Run four Redis ACL isolated-writer and shared-rollback controls
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -vv -ra --tb=short \
+            se/tests/integration/test_alpha_s04_legacy_redis_otp_writer_redfirst.py \
+            -k test_s04_acl_ \
+            --junitxml=alpha-s04-acl-epoch-physical.xml
+      - name: Require four exact ACL scenario identities in raw JUnit
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          path = Path("alpha-s04-acl-epoch-physical.xml")
+          assert path.is_file(), "HARNESS_ERROR: S04 raw JUnit missing"
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+          cases = [case for suite in suites for case in suite.findall("testcase")]
+          # Exact parameterized scenario identities, not the shared base name.
+          # Two identical 'registration' cases must never stand in for reset.
+          expected_variants = Counter({
+              "test_s04_acl_distinct_writer_epoch_denies_old_set[registration]": 1,
+              "test_s04_acl_distinct_writer_epoch_denies_old_set[password_reset]": 1,
+              "test_s04_acl_shared_credentials_rollback_hazard_control[registration]": 1,
+              "test_s04_acl_shared_credentials_rollback_hazard_control[password_reset]": 1,
+          })
+          observed = Counter(case.attrib.get("name", "") for case in cases)
+          assert observed == expected_variants, (
+              "HARNESS_ERROR: S04 physical variant identity missing/duplicated", observed
+          )
+          assert len(cases) == 4 and len(suites) == 1, (
+              "HARNESS_ERROR: S04 unexpected JUnit case/suite shape"
+          )
+          suite = suites[0]
+          assert all(suite.attrib.get(k) == v for k, v in {
+              "tests": "4", "failures": "0", "errors": "0", "skipped": "0"
+          }.items()), "HARNESS_ERROR: S04 JUnit suite counts do not match oracle"
+          for case in cases:
+              classname = case.attrib.get("classname", "").replace(".", "/")
+              assert classname.endswith(
+                  "test_alpha_s04_legacy_redis_otp_writer_redfirst"
+              ), "HARNESS_ERROR: S04 testcase source identity drift"
+          counts = {
+              tag: sum(case.find(tag) is not None for case in cases)
+              for tag in ("failure", "error", "skipped")
+          }
+          print("S04_ACL_EPOCH_4_CASES", counts)
+          assert counts["skipped"] == 0, "HARNESS_ERROR: strict physical test skipped"
+          assert counts["error"] == 0, "HARNESS_ERROR_OR_PHYSICAL_ERROR: inspect JUnit"
+          assert counts["failure"] == 0, "S04_SEMANTIC_RED: preserve RED receipt"
+      - name: Upload raw physical JUnit even on RED
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-s04-acl-epoch-pg17-raw
+          path: alpha-s04-acl-epoch-physical.xml
+          if-no-files-found: error
