@@ -505,14 +505,14 @@ def test_s04_acl_distinct_writer_epoch_denies_old_set(purpose):
             assert await admin.execute_command(
                 "ACL", "SETUSER", old_user, "reset", "on", ">" + old_password,
                 "~pending_reg:*", "~pending_password_reset:*",
-                "+ping", "+get", "+set", "+ttl"
+                "+ping", "+get", "+set", "+ttl", "+select"
             )
             created.append(old_user)
             assert await admin.execute_command(
                 "ACL", "SETUSER", new_user, "reset", "on", ">" + new_password,
                 "~pending_reg:*", "~pending_password_reset:*",
                 "~otp_cooldown:*", "~password_reset_cooldown:*",
-                "+ping", "+get", "+getdel", "+set", "+ttl"
+                "+ping", "+get", "+getdel", "+set", "+ttl", "+select"
             )
             created.append(new_user)
             old = redis.Redis(host="127.0.0.1", port=6379, db=15,
@@ -535,7 +535,7 @@ def test_s04_acl_distinct_writer_epoch_denies_old_set(purpose):
             assert await admin.execute_command(
                 "ACL", "SETUSER", old_user, "reset", "on",
                 ">" + old_password, "~pending_reg:*", "~pending_password_reset:*",
-                "+ping", "+get", "+ttl"
+                "+ping", "+get", "+ttl", "+select"
             )
             for command in (
                 ("SET", key, "late", "EX", 300),
@@ -602,7 +602,7 @@ def test_s04_acl_shared_credentials_rollback_hazard_control(purpose):
             assert await admin.execute_command(
                 "ACL", "SETUSER", name, "reset", "on", ">" + password,
                 "~pending_reg:*", "~pending_password_reset:*",
-                "+ping", "+get", "+set"
+                "+ping", "+get", "+set", "+select"
             )
             created = True
             old = redis.Redis(host="127.0.0.1", port=6379, db=15,
