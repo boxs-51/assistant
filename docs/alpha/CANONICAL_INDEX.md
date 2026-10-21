@@ -1,6 +1,6 @@
 # Alpha canonical documentation index — 2026-10-19
 
-**Classification:** CURRENT_STATE index for development planning only. **Baseline source SHA:** 76842cf56f40faab3083c6de390373ef56fb65f2 (before documentation-only normalization). The current alpha commit may advance when docs are published; always re-read the actual branch SHA before claiming exact-head test evidence.
+**Classification:** CURRENT_STATE index for development planning only. **Historical source baseline:** `76842cf56f40faab3083c6de390373ef56fb65f2` (2026-10-19). **Current audited integration base:** `alpha@300801d67c43d702408d2895f7c89898e27a87fd` (2026-10-21). The live alpha ref may advance with documentation commits; always re-read the branch SHA for exact-head proof.
 
 ## Purpose / authority
 This document is the navigational entrypoint for **alpha non-production**. It describes observations, not new rights or production certification. Human Owner requests, actual GitHub protections and independently retained technical P0/P1/security HOLDs remain separate from this index. No merge into main, deployment, waiver, privileged Native enablement, branch deletion or weakening of tests is authorized.
@@ -14,7 +14,14 @@ This document is the navigational entrypoint for **alpha non-production**. It de
 
 These documents are current **indexes/assessments** only; they do not rewrite immutable historical requirements. A newer user-authorized technical contract must be evaluated within its exact scope before it can supersede an older one. Old snapshots are not today's release status.
 
-## Verified GitHub snapshot (2026-10-19)
+## Post-S03 alpha checkpoint (2026-10-21)
+- S01 [#658](https://github.com/boxs-51/assistant/issues/658) CLOSED for evidence inventory only; S02 [#659](https://github.com/boxs-51/assistant/issues/659) scoped physical PASS via PR #667 (`32a`); S03 [#660](https://github.com/boxs-51/assistant/issues/660) scoped physical PASS via [PR #668](https://github.com/boxs-51/assistant/pull/668) (`32b`). All are nonproduction stage decisions; none certifies S09/production.
+- PR #668 exact source HEAD `a7b4a5c8` passed all 12 workflows including SQLite 85/Linux, 85/Windows and PG17 9. At **merge SHA** `300801d6`, [AIC467 PG17](https://github.com/boxs-51/assistant/actions/runs/39535525959) Linux and Windows each passed 58; full S03/Architecture merge-head regression remains unverified (#655).
+- Codex **Code Review** at the PR head completed without findings; Codex **Security Review was not run**. Alpha is experimental and does not require required-status ruleset/external attestor per Owner; no release waiver follows.
+- S04 [#661](https://github.com/boxs-51/assistant/issues/661) remains HOLD/NOT_STARTED during the Owner-requested alpha audit. Parent #649–#656 security and release liabilities remain distinct.
+- See [branch custody audit](BRANCH_CLEANUP_AUDIT_20261021.md); no branch deletion is implied by documentation.
+
+## Verified GitHub snapshot (historical, 2026-10-19)
 - Initial alpha at assessment: 76842cf56f40faab3083c6de390373ef56fb65f2; main: 858004fae17732f3b388383c28146c12b36ecdb9.
 - At inventory, open PR count 0; open issue count 8 (#649–#656).
 - Git tree: 1,539 blobs, 216 directories, 233 docs paths and 33 .github/workflows YAML files (recursive result not truncated).
@@ -45,4 +52,4 @@ Historical issues and PR discussions remain readable; administrative closure did
 Documentation-only updates may improve navigation/status without source changes. Preserve lineage, URLs, effective phase and original P0/STOP oracle. New plans are NOT_OWNER_APPROVAL; any future repair must start with the issue's frozen acceptance and observed RED/negative baseline. No main merge or deploy.
 
 ## Execution tracker (created after first documentation normalization)
-The development-line master issue is [#657](https://github.com/boxs-51/assistant/issues/657). Child stages (not completed) are [S01 #658](https://github.com/boxs-51/assistant/issues/658), [S02 #659](https://github.com/boxs-51/assistant/issues/659), [S03 #660](https://github.com/boxs-51/assistant/issues/660), [S04 #661](https://github.com/boxs-51/assistant/issues/661), [S05 #662](https://github.com/boxs-51/assistant/issues/662), [S06 #663](https://github.com/boxs-51/assistant/issues/663), [S07 #664](https://github.com/boxs-51/assistant/issues/664), optional S08 remains [#654](https://github.com/boxs-51/assistant/issues/654), and [S09 #665](https://github.com/boxs-51/assistant/issues/665). These are execution work items distinct from the eight owner-domain custodial issues #649–#656. No child stage currently has an evidenced gate PASS. The S01 branch is created only after this issue map is finalized.
+The development-line master issue is [#657](https://github.com/boxs-51/assistant/issues/657). **S01 #658** is CLOSED for evidence inventory only; **S02 #659** and **S03 #660** are scoped PASS/MERGED_ALPHA. **S04 #661**, **S05 #662**, **S06 #663**, **S07 #664** and **S09 #665** remain open; optional S08 stays planned under [#654](https://github.com/boxs-51/assistant/issues/654). Owner-domain issues #649–#656 retain separate obligations; closed stage ≠ release certification.

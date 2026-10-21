@@ -30,19 +30,25 @@
 | PDRM-06 code→docs | README navigation gap addressed by new current index; follow-up operational quickstart E2E unverified |
 | PDRM-07 docs→code | Agent-only is target, DIRECT remains intentionally wired; no automatic violation |
 | PDRM-08 MARM | legacy-modern intentional hybrid preserved |
-| PDRM-09 migrations | Alembic 31t + 31b two-head unresolved, P0 |
+| PDRM-09 migrations | Historical dual-head 31t+31b fixed in nonproduction alpha by merge-only 32a PR #667; forward-only owner integrity 32b PR #668 follows; production installed-data upgrade requires fresh preflight |
 | PDRM-10 interfaces | actual DTO/serialization/auth/driver E2E incomplete |
 | PDRM-11 security | no issuer/grant inferred from Skill/docs; production Native hold |
-| PDRM-12 verification | PG17 narrow green is not alpha full-suite proof |
+| PDRM-12 verification | PR #668 S03/Architecture matrix PASS at PR HEAD; exact merge-SHA AIC467 PG17 58/Linux + 58/Windows PASS, not a full post-merge E2E certificate |
 | PDRM-13 cross-document | old ledgers are correctly historical, NOT a current conflict |
-| PDRM-14 traceability | successor issues #649–#656, specific child issues pending |
+| PDRM-14 traceability | #649–#656 parent custody; S01 #658 evidence-only closed, S02 #659 and S03 #660 scoped PASS/closed, #661 onwards unresolved |
 | PDRM-15 authority | doc-only normalization authorized; source/test edits NOT authorized at S00 |
 | PDRM-16 closure | task, documentation, software readiness statuses reported separately |
+
+## Verified post-S03 alpha checkpoint (2026-10-21; historical assessment retained)
+- At `alpha@300801d67c43d702408d2895f7c89898e27a87fd`, S02 #659 via PR #667 (32a) and S03 #660 via PR #668 (32b) were completed for scoped **nonproduction** proofs.
+- PR-head S03 physical matrix: SQLite Linux 85 PASS, Windows 85 PASS, strict PG17 9 PASS, portable/dual-lane CI PASS. Merge-head AIC467 PG17 Linux and Windows each 58 PASS; full merge-head Architecture/S03 E2E unverified (#655/#665).
+- Automatic Codex **Code Review** on PR #668 completed at exact PR HEAD with no findings; **Security Review not run**. Alpha does not require branch protection per Owner; release/main obligations are separate.
+- Remote branch ancestry/PR custody: [BRANCH_CLEANUP_AUDIT_20261021.md](BRANCH_CLEANUP_AUDIT_20261021.md). A deletion candidate is not a deletion receipt.
 
 ## Current doc→code reconciliation
 - Source in se/src/main.py bootstraps DirectChatRuntime and AgentRuntime; se/src/domain/schemas/request.py chooses DIRECT by default. Treat Agent-only roadmap as PLANNED, preserve compatibility.
 - Old docs referencing former Policy #85 as current must be interpreted with the repository's retirement banner; no revival or tool access grant.
-- Alembic migration 31t and 31b are distinct heads: operational docs MUST NOT recommend general upgrade head on live data pending S02.
+- Before S02, Alembic 31t and 31b were distinct heads. In `alpha@300801d6`, merge-only 32a joins them; forward-only 32b follows. Operational docs MUST NOT recommend a generic `upgrade head` on live data without environment-specific installed-state, grants, backup, rollback and failure-mode preflight.
 - Native negative receipt guards are CODE_PRESENT and not genuine OS-issued permission. Full OS proof UNVERIFIED.
 - Current issue inventory has superseded historic issues; closed historical issue ≠ technical PASS.
 - No asserted changes to old specification facts merely to reconcile current code.
