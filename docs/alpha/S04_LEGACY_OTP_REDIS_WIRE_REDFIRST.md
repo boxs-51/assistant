@@ -2,7 +2,7 @@
 
 **Stage:** #661 (AE359) · **Parent:** #650 · **Predecessor:** #660 scoped PASS/MERGED_ALPHA
 **Frozen nonproduction base:** `alpha@ee2a71c5cbdce1aed2431fed62f05f7cf79e8ddb`
-**State:** TEST-ONLY / RED-FIRST NOT_YET_OBSERVED at authoring; never infer production readiness.
+**State:** RED_OBSERVED on exact test-only HEAD; bounded SET-NX repair submitted, GREEN_NOT_YET_OBSERVED. Never infer production readiness.
 
 ## Fault model and why the current fence may not suffice
 
@@ -50,3 +50,26 @@ exact PR head SHA. Never mark the entire S04 PASS from these two cases.
 **Actions excluded:** no edits to original negative/security oracles, no source
 repair before physical RED, no production services, main merge, deploy,
 Native enablement or security permissions changes.
+
+## Exact physical RED evidence and bounded repair (2026-10-21)
+
+- Test-only PR #670 HEAD `fadee55e4461da587b7b7bad7e774a539726af00`.
+- GitHub Actions [run 39575672438](https://github.com/boxs-51/assistant/actions/runs/39575672438),
+  job [119140457555](https://github.com/boxs-51/assistant/actions/jobs/119140457555):
+  **2 S04_SEMANTIC_RED / 0 ERROR / 0 SKIP** under real Redis 7.4 +
+  PostgreSQL 17.11. Registration and password-reset legacy-first physical
+  tests each observed modern writer outcome=SUCCESS with old challenge
+  destroyed; raw JUnit artifact ID `12334582437`.
+- Minimal source repair: for the two OTP challenge key namespaces only,
+  Redis SET is now sent with **NX + EX atomically**, not GET-then-SET.
+  Redis-confirmed NX collision produces typed `CacheWriteCollision`
+  distinct from `CacheWriteNotDispatched` and uncertain network ACK.
+  Other cache/cooldown keys retain ordinary SET semantics.
+- Existing R-ACK and security negative tests are not edited. Any final
+  GREEN must be witnessed at exact *new* PR head and inspect raw job logs;
+  CI success is not a cross-version release certificate.
+- This only blocks a **modern write following a live legacy write**. A
+  still-unrestricted legacy client can overwrite modern data later. No
+  security claim for legacy-after-modern, running old binary, failover or
+  migration admission until the old write path is retired/gated and both
+  directions independently verified.
