@@ -83,8 +83,8 @@ def test_s04_separate_strict_physical_ci_cannot_disappear_or_false_pass() -> Non
         assert case in workflow, "S04 strict physical test was not selected"
         assert strict_env in workflow, "S04 strict backend admission missing"
         assert head_key in workflow and "git rev-parse HEAD" in workflow
-        assert '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[registration]": 1',
-        '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[password_reset]": 1' in workflow
+        assert '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[registration]": 1' in workflow
+        assert '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[password_reset]": 1' in workflow
         for outcome in ("failure", "error", "skipped"):
             assert f'assert counts["{outcome}"] == 0' in workflow
         assert "--junitxml=alpha-s04-legacy-redis-physical.xml" in workflow
