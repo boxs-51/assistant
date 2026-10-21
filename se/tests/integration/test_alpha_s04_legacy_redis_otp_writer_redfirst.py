@@ -371,3 +371,106 @@ def test_s04_mixed_isolated_sql_only_positive_control(purpose):
                 )
             await engine.dispose()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_inmemory_modern_with_live_legacy_must_not_double_redeem(purpose):
+    """A process-local modern OTP is not exclusive while old Redis OTP lives."""
+    from se.src.infrastructure.config.schemas import DriverConfig
+    from se.src.infrastructure.storage.drivers.inmemory.driver import InMemoryDriver
+
+    async def run():
+        redis_url, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-memory-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        old = redis.Redis.from_url(redis_url, decode_responses=True)
+        redis_reader = None
+        memory = InMemoryDriver(DriverConfig(options={}))
+        try:
+            assert await old.ping(), "S04_HARNESS_ERROR: Redis unavailable"
+            old_payload = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "legacy-redis"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await old.set(key, old_payload, ex=300) is True
+            assert await old.get(key) == old_payload
+            assert await old.ttl(key) > 0
+            assert await _row_count(engine, email) == 0
+
+            await memory.connect()
+            modern_inmemory = OTPStorageService(memory, _factory(engine))
+            await getattr(modern_inmemory, save)(
+                email, {"value": "modern-inmemory"}, "222222"
+            )
+            assert await old.get(key) == old_payload, (
+                "S04_HARNESS_ERROR: legacy Redis fixture was unexpectedly modified"
+            )
+            redis_reader = await _redis_driver(redis_url)
+            old_verifier = OTPStorageService(redis_reader, _factory(engine))
+            original = await getattr(old_verifier, verify)(email, "111111")
+            second = await getattr(modern_inmemory, verify)(email, "222222")
+            replay = await getattr(modern_inmemory, verify)(email, "222222")
+            assert original == {"value": "legacy-redis"}, (
+                "S04_HARNESS_ERROR: legacy OTP positive control failed"
+            )
+            assert second is None, (
+                "S04_MIXED_SEMANTIC_RED: legacy Redis and modern InMemory "
+                f"accepted distinct OTPs for same principal/purpose ({purpose})"
+            )
+            assert replay is None, "S04_MIXED_SEMANTIC_RED: memory OTP replayed"
+        finally:
+            if redis_reader is not None:
+                await redis_reader.disconnect()
+            await memory.disconnect()
+            await old.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await old.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_isolated_inmemory_positive_control(purpose):
+    """Single process in-memory one-time behavior remains a healthy control."""
+    from se.src.infrastructure.config.schemas import DriverConfig
+    from se.src.infrastructure.storage.drivers.inmemory.driver import InMemoryDriver
+
+    async def run():
+        _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-memory-control-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        memory = InMemoryDriver(DriverConfig(options={}))
+        try:
+            await memory.connect()
+            service = OTPStorageService(memory, _factory(engine))
+            await getattr(service, save)(
+                email, {"value": "memory-only-control"}, "333333"
+            )
+            assert await getattr(service, verify)(email, "333333") == {
+                "value": "memory-only-control"
+            }
+            assert await getattr(service, verify)(email, "333333") is None
+        finally:
+            await memory.disconnect()
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await engine.dispose()
+    asyncio.run(run())

@@ -73,7 +73,7 @@ jobs:
             se/tests/integration/test_alpha_s04_legacy_redis_otp_writer_redfirst.py \
             -k test_s04_mixed_ \
             --junitxml=alpha-s04-mixed-authority-physical.xml
-      - name: Require all six exact mixed-authority scenario identities in raw JUnit
+      - name: Require all ten exact mixed-authority scenario identities in raw JUnit
         if: always()
         shell: python
         run: |
@@ -94,17 +94,21 @@ jobs:
               "test_s04_mixed_legacy_late_set_must_not_replace_modern_ack[password_reset]": 1,
               "test_s04_mixed_isolated_sql_only_positive_control[registration]": 1,
               "test_s04_mixed_isolated_sql_only_positive_control[password_reset]": 1,
+              "test_s04_mixed_inmemory_modern_with_live_legacy_must_not_double_redeem[registration]": 1,
+              "test_s04_mixed_inmemory_modern_with_live_legacy_must_not_double_redeem[password_reset]": 1,
+              "test_s04_mixed_isolated_inmemory_positive_control[registration]": 1,
+              "test_s04_mixed_isolated_inmemory_positive_control[password_reset]": 1,
           })
           observed = Counter(case.attrib.get("name", "") for case in cases)
           assert observed == expected_variants, (
               "HARNESS_ERROR: S04 physical variant identity missing/duplicated", observed
           )
-          assert len(cases) == 6 and len(suites) == 1, (
+          assert len(cases) == 10 and len(suites) == 1, (
               "HARNESS_ERROR: S04 unexpected JUnit case/suite shape"
           )
           suite = suites[0]
           assert all(suite.attrib.get(k) == v for k, v in {
-              "tests": "6", "failures": "0", "errors": "0", "skipped": "0"
+              "tests": "10", "failures": "0", "errors": "0", "skipped": "0"
           }.items()), "HARNESS_ERROR: S04 JUnit suite counts do not match oracle"
           for case in cases:
               classname = case.attrib.get("classname", "").replace(".", "/")
@@ -115,7 +119,7 @@ jobs:
               tag: sum(case.find(tag) is not None for case in cases)
               for tag in ("failure", "error", "skipped")
           }
-          print("S04_MIXED_AUTHORITY_6_CASES", counts)
+          print("S04_MIXED_AUTHORITY_10_CASES", counts)
           assert counts["skipped"] == 0, "HARNESS_ERROR: strict physical test skipped"
           assert counts["error"] == 0, "HARNESS_ERROR_OR_PHYSICAL_ERROR: inspect JUnit"
           assert counts["failure"] == 0, "S04_SEMANTIC_RED: preserve RED receipt"
