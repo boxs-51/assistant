@@ -75,10 +75,10 @@ def test_s04_separate_strict_physical_ci_cannot_disappear_or_false_pass() -> Non
     for case, (workflow_path, strict_env, head_key) in S04_CASES.items():
         workflow = _read(workflow_path)
         assert re.search(
-            r"(?m)^on:\\n  pull_request:\\n  workflow_dispatch:", workflow
+            r"(?m)^on:\n  pull_request:\n  workflow_dispatch:", workflow
         ), f"{workflow_path} must run for every PR"
         assert not re.search(
-            r"(?m)^\\s+(?:paths|paths-ignore):", workflow
+            r"(?m)^\s+(?:paths|paths-ignore):", workflow
         ), "S04 physical workflow cannot be filtered by paths"
         assert case in workflow, "S04 strict physical test was not selected"
         assert strict_env in workflow, "S04 strict backend admission missing"
