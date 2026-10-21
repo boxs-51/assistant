@@ -31,10 +31,10 @@ def test_s04_strict_physical_handoff_and_s03_frozen_oracles():
     contract.verify_contract()
     for filename in LANES:
         source = (contract.ROOT / filename).read_text(encoding="utf-8")
-        ignored = re.findall(r"--ignore=([^\\s]+)", source)
+        ignored = re.findall(r"--ignore=([^\s]+)", source)
         assert len(ignored) == 4
         assert set(ignored) == contract.AE359_IGNORES | {S04}
-        assert len(re.findall(r"--deselect=([^\\s]+)", source)) == 8
+        assert len(re.findall(r"--deselect=([^\s]+)", source)) == 8
 
 
 @pytest.mark.parametrize("lane", LANES)

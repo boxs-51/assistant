@@ -190,7 +190,7 @@ def verify_contract() -> None:
     # falsely claim an external workflow succeeded: GitHub must verify it.
     s04 = (ROOT / ".github/workflows/alpha-s04-otp-legacy-redis-pg17-redfirst.yml").read_text(encoding="utf-8")
     required_s04 = (
-        "on:\\n  pull_request:", 
+        "on:\n  pull_request:",
         'AE359_POSTACK_STRICT: "1"',
         "S04_EXPECTED_SHA:",
         'test "$(git rev-parse HEAD)" = "$S04_EXPECTED_SHA"',
@@ -202,8 +202,6 @@ def verify_contract() -> None:
         'assert counts["failure"] == 0',
         "if-no-files-found: error",
     )
-    # The event anchor above is a newline, not the literal two characters \\n.
-    required_s04 = ("on:\n  pull_request:", *required_s04[1:])
     for witness in required_s04:
         require(witness in s04, f"S04 physical admission/evidence missing: {witness}")
     require("paths:" not in s04, "S04 physical workflow cannot be path-filtered")
