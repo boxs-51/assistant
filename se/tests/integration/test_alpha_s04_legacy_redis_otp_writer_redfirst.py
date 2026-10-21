@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 import redis.asyncio as redis
 
+from se.src.infrastructure.storage.interfaces.cache import CacheWriteCollision
 from se.src.infrastructure.storage.models.sql.user_data.pending_registration import PendingRegistration
 from se.src.transport.gateway.authentication.services.otp_service import OTPStorageService
 from se.tests.integration.test_ae359_post_ack_loss_physical import (
@@ -34,11 +35,16 @@ def test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt(purpose
         redis_url, _ = _targets()  # Fail/skip closed under the existing physical admission.
         engine = await _pg_engines()  # Attests actual PG17, not SQLite/mock.
         email = f"s04-legacy-{uuid4().hex}@example.invalid"
+        new_email = f"s04-modern-positive-{uuid4().hex}@example.invalid"
         reset = purpose == "password_reset"
         key = ("pending_password_reset:" if reset else "pending_reg:") + email
         cooldown_key = (
             "password_reset_cooldown:" if reset else "otp_cooldown:"
         ) + email
+        new_key = ("pending_password_reset:" if reset else "pending_reg:") + new_email
+        new_cooldown_key = (
+            "password_reset_cooldown:" if reset else "otp_cooldown:"
+        ) + new_email
         save_name = (
             "save_pending_password_reset" if reset
             else "save_pending_registration"
@@ -62,30 +68,43 @@ def test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt(purpose
             # Independent Redis client and real SQL UOW model a new writer.
             new_driver = await _redis_driver(redis_url)
             modern = OTPStorageService(new_driver, _factory(engine))
-            try:
+            # Never accept an arbitrary exception as a valid rejection.
+            # A broken database/driver or pre-dispatch outage is NOT proof
+            # that the Redis NX collision safety boundary was exercised.
+            with pytest.raises(CacheWriteCollision, match="Live OTP already exists"):
                 await getattr(modern, save_name)(
                     email, {"value": "modern-attempt"}, "222222"
                 )
-            except Exception:
-                # Denial is allowed, provided the original is still usable.
-                outcome = "REJECTED"
-            else:
-                outcome = "SUCCESS"
 
             actual = await old_client.get(key)
             assert actual == original, (
                 "S04_SEMANTIC_RED: modern SET destroyed an active pre-fence "
-                f"legacy OTP ({purpose}; outcome={outcome})"
+                f"legacy OTP ({purpose})"
             )
-            assert outcome == "REJECTED", (
-                "S04_SEMANTIC_RED: modern writer acknowledged another issuance "
-                f"despite active legacy challenge ({purpose})"
+            assert await old_client.ttl(key) > 0, (
+                "S04_SEMANTIC_RED: original challenge lost its live TTL"
             )
             assert await _row_count(engine, email) == 0, (
                 "S04_SEMANTIC_RED: a second SQL OTP authority was persisted"
             )
 
+            # Positive control on the SAME physical modern driver/UOW:
+            # collision rejection must not be mistaken for a broken writer.
+            await getattr(modern, save_name)(
+                new_email, {"value": "modern-positive"}, "333333"
+            )
+            assert await old_client.exists(new_key) == 1, (
+                "S04_HARNESS_ERROR: modern positive control never reached Redis"
+            )
+
             verifier = OTPStorageService(new_driver, _factory(engine))
+            fresh = await getattr(verifier, verify_name)(new_email, "333333")
+            assert fresh == {"value": "modern-positive"}, (
+                "S04_SEMANTIC_RED: fresh modern OTP failed positive verification"
+            )
+            assert await getattr(verifier, verify_name)(new_email, "333333") is None, (
+                "S04_SEMANTIC_RED: fresh modern OTP replayed"
+            )
             first = await getattr(verifier, verify_name)(email, "111111")
             second = await getattr(verifier, verify_name)(email, "222222")
             replay = await getattr(verifier, verify_name)(email, "111111")
@@ -95,11 +114,11 @@ def test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt(purpose
         finally:
             if new_driver is not None:
                 await new_driver.disconnect()
-            await old_client.delete(key, cooldown_key)
+            await old_client.delete(key, cooldown_key, new_key, new_cooldown_key)
             async with engine.begin() as connection:
                 await connection.execute(
                     PendingRegistration.__table__.delete().where(
-                        PendingRegistration.email == email
+                        PendingRegistration.email.in_([email, new_email])
                     )
                 )
             await old_client.aclose()
