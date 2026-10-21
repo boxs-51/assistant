@@ -84,10 +84,28 @@ jobs:
           root = ET.parse(path).getroot()
           suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
           cases = [case for suite in suites for case in suite.findall("testcase")]
-          found = Counter(case.attrib["name"].split("[", 1)[0] for case in cases)
-          assert found == Counter({
-              "test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt": 2
-          }), ("HARNESS_ERROR: S04 physical oracle missing/duplicated", found)
+          # Exact parameterized scenario identities, not the shared base name.
+          # Two identical 'registration' cases must never stand in for reset.
+          expected_variants = Counter({
+              "test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[registration]": 1,
+              "test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[password_reset]": 1,
+          })
+          observed = Counter(case.attrib.get("name", "") for case in cases)
+          assert observed == expected_variants, (
+              "HARNESS_ERROR: S04 physical variant identity missing/duplicated", observed
+          )
+          assert len(cases) == 2 and len(suites) == 1, (
+              "HARNESS_ERROR: S04 unexpected JUnit case/suite shape"
+          )
+          suite = suites[0]
+          assert all(suite.attrib.get(k) == v for k, v in {
+              "tests": "2", "failures": "0", "errors": "0", "skipped": "0"
+          }.items()), "HARNESS_ERROR: S04 JUnit suite counts do not match oracle"
+          for case in cases:
+              classname = case.attrib.get("classname", "").replace(".", "/")
+              assert classname.endswith(
+                  "test_alpha_s04_legacy_redis_otp_writer_redfirst"
+              ), "HARNESS_ERROR: S04 testcase source identity drift"
           counts = {
               tag: sum(case.find(tag) is not None for case in cases)
               for tag in ("failure", "error", "skipped")
