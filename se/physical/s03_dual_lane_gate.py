@@ -37,6 +37,9 @@ AE359_IGNORES = frozenset((
     "se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py",
     "se/tests/integration/test_ae359_post_ack_loss_physical.py",
 ))
+# S04 challenge tests need actual Redis/PG17, so portable lanes must not
+# collect-and-skip them. The strict S04 job runs their two variants.
+S04_PHYSICAL_IGNORE = "se/tests/integration/test_alpha_s04_legacy_redis_otp_writer_redfirst.py"
 
 
 def require(condition: bool, message: str) -> None:
@@ -178,8 +181,31 @@ def verify_contract() -> None:
         require(len(deselect) == len(PHYSICAL) and set(deselect) == PHYSICAL,
                 f"{name}: not the exact eight physical reroutes")
         ignored = re.findall(r"--ignore=([^\s]+)", value)
-        require(len(ignored) == 3 and set(ignored) == AE359_IGNORES,
-                f"{name}: AE359 boundary changed")
+        expected_ignores = AE359_IGNORES | {S04_PHYSICAL_IGNORE}
+        require(len(ignored) == len(expected_ignores) and set(ignored) == expected_ignores,
+                f"{name}: AE359 or S04 physical-only test routing changed")
+    # Separate S04 run is mandatory evidence for the excluded physical module.
+    # Verify the gate is unfiltered, exact-HEAD, strict and checks two JUnit
+    # test identities with zero fail/error/skip. The S03 verifier does not
+    # falsely claim an external workflow succeeded: GitHub must verify it.
+    s04 = (ROOT / ".github/workflows/alpha-s04-otp-legacy-redis-pg17-redfirst.yml").read_text(encoding="utf-8")
+    required_s04 = (
+        "on:\n  pull_request:",
+        'AE359_POSTACK_STRICT: "1"',
+        "S04_EXPECTED_SHA:",
+        'test "$(git rev-parse HEAD)" = "$S04_EXPECTED_SHA"',
+        "se/tests/integration/test_alpha_s04_legacy_redis_otp_writer_redfirst.py",
+        "--junitxml=alpha-s04-legacy-redis-physical.xml",
+        '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[registration]": 1',
+        '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[password_reset]": 1',
+        'assert counts["skipped"] == 0',
+        'assert counts["error"] == 0',
+        'assert counts["failure"] == 0',
+        "if-no-files-found: error",
+    )
+    for witness in required_s04:
+        require(witness in s04, f"S04 physical admission/evidence missing: {witness}")
+    require("paths:" not in s04, "S04 physical workflow cannot be path-filtered")
     require("postgres:" not in arch.lower(), "Architecture now provisioned PG17")
     require("image: postgres:17-alpine" in owner, "Real PG17 removed")
     require("Attest exact HEAD and disposable PG17" in owner, "Physical HEAD attestation missing")

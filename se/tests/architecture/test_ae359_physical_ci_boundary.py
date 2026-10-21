@@ -24,6 +24,16 @@ CASES = {
     ),
 }
 
+# Additional physical-only S04 suite; the three pre-existing AE359 cases
+# above stay frozen. Never turn this into a generic or optional exclusion.
+S04_CASES = {
+    "se/tests/integration/test_alpha_s04_legacy_redis_otp_writer_redfirst.py": (
+        ".github/workflows/alpha-s04-otp-legacy-redis-pg17-redfirst.yml",
+        "AE359_POSTACK_STRICT",
+        "S04_EXPECTED_SHA:",
+    ),
+}
+
 
 def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
@@ -38,11 +48,12 @@ def test_architecture_baseline_keeps_ubq2_fixture_barrier_and_explicit_split() -
     assert "AE359_POSTACK_PG_URL" not in workflow
     assert "python -m pytest -q" in workflow
     ignored = re.findall(r"--ignore=([^\s]+)", workflow)
-    assert set(ignored) == set(CASES), (
-        "The Architecture split must list exactly the three physical cases, "
-        "not expand into unrelated test exclusions."
+    assert set(ignored) == set(CASES) | set(S04_CASES), (
+        "The Architecture split must preserve all three original AE359 "
+        "physical cases plus exactly the required S04 physical handoff; "
+        "no unrelated exclusions allowed."
     )
-    assert len(ignored) == len(CASES)
+    assert len(ignored) == len(CASES) + len(S04_CASES)
 
 
 def test_every_physical_suite_runs_unfiltered_for_all_prs() -> None:
@@ -58,3 +69,23 @@ def test_every_physical_suite_runs_unfiltered_for_all_prs() -> None:
         assert strict_env in workflow, f"{workflow_path} lost strict admission"
         assert "AE359_EXPECTED_SHA:" in workflow
         assert "git rev-parse HEAD" in workflow
+
+
+def test_s04_separate_strict_physical_ci_cannot_disappear_or_false_pass() -> None:
+    for case, (workflow_path, strict_env, head_key) in S04_CASES.items():
+        workflow = _read(workflow_path)
+        assert re.search(
+            r"(?m)^on:\n  pull_request:\n  workflow_dispatch:", workflow
+        ), f"{workflow_path} must run for every PR"
+        assert not re.search(
+            r"(?m)^\s+(?:paths|paths-ignore):", workflow
+        ), "S04 physical workflow cannot be filtered by paths"
+        assert case in workflow, "S04 strict physical test was not selected"
+        assert strict_env in workflow, "S04 strict backend admission missing"
+        assert head_key in workflow and "git rev-parse HEAD" in workflow
+        assert '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[registration]": 1' in workflow
+        assert '"test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt[password_reset]": 1' in workflow
+        for outcome in ("failure", "error", "skipped"):
+            assert f'assert counts["{outcome}"] == 0' in workflow
+        assert "--junitxml=alpha-s04-legacy-redis-physical.xml" in workflow
+        assert "if-no-files-found: error" in workflow

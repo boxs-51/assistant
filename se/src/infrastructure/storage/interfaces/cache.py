@@ -81,3 +81,21 @@ class CacheWriteNotDispatched(RuntimeError):
     This signal may permit fallback to an alternate OTP authority; lying
     about pre-dispatch status creates a cross-store one-use bypass.
     """
+
+class CacheWriteLegacyAuthorityUnknown(CacheWriteNotDispatched):
+    """SET not dispatched, but another legacy Redis writer may already own OTP.
+
+    A new or unconnected RedisDriver cannot prove that an older writer has
+    not placed a live challenge in Redis. This typed receipt MUST NOT
+    authorize SQL fallback, even though this driver's own SET was not sent.
+    Cache backends without externally attested single-authority ownership
+    must use this class rather than plain CacheWriteNotDispatched.
+    """
+
+
+class CacheWriteCollision(RuntimeError):
+    """Atomic Redis NX reports an already-existing live cache challenge.
+
+    This is a confirmed collision, not CacheWriteNotDispatched and not a
+    fallback-authorizing cache miss. The original value must remain intact.
+    """

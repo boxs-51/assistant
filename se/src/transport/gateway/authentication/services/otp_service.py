@@ -5,7 +5,9 @@ from typing import Callable, Optional
 import structlog
 
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
-from .....infrastructure.storage.interfaces.cache import CacheDriver, CacheWriteNotDispatched
+from .....infrastructure.storage.interfaces.cache import (
+    CacheDriver, CacheWriteNotDispatched, CacheWriteLegacyAuthorityUnknown,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -49,9 +51,15 @@ class OTPStorageService:
         if self.cache_driver is not None:
             try:
                 await self.cache_driver.set(f"pending_reg:{email}", payload_str, self.otp_ttl)
+            except CacheWriteLegacyAuthorityUnknown:
+                # The modern SET was not dispatched, but a pre-fence legacy
+                # Redis challenge may already exist. Never mint an independent
+                # SQL OTP without a proven single authority.
+                logger.error("OTP legacy Redis authority unverified; SQL fallback denied")
+                raise
             except CacheWriteNotDispatched:
-                # An attested pre-dispatch failure cannot have made this OTP
-                # live in the cache. Only this state permits SQL fallback.
+                # Genuine no-cache-authority controls retain the documented
+                # confirmed pre-dispatch SQL fallback contract.
                 logger.warning("OTP cache write not dispatched; using database fallback")
             except Exception as exc:
                 # Redis may have committed SET before its ACK was lost.
@@ -102,6 +110,9 @@ class OTPStorageService:
                 await self.cache_driver.set(
                     f"pending_password_reset:{email}", payload_str, self.otp_ttl
                 )
+            except CacheWriteLegacyAuthorityUnknown:
+                logger.error("Password-reset legacy Redis authority unverified; SQL fallback denied")
+                raise
             except CacheWriteNotDispatched:
                 logger.warning(
                     "Password-reset OTP cache write not dispatched; using database fallback"
