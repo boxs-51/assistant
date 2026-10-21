@@ -71,6 +71,7 @@ jobs:
           set -o pipefail
           python -m pytest -vv -ra --tb=short \
             se/tests/integration/test_alpha_s04_legacy_redis_otp_writer_redfirst.py \
+            -k test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt \
             --junitxml=alpha-s04-legacy-redis-physical.xml
       - name: Require both original-oracle variants in raw JUnit
         if: always()

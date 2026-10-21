@@ -125,3 +125,87 @@ def test_s04_existing_legacy_redis_otp_must_survive_modern_issue_attempt(purpose
             await engine.dispose()
 
     asyncio.run(run())
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_legacy_first_cold_redis_must_not_issue_second_sql_otp(purpose):
+    """F-670-SEC-01: old Redis OTP + cold new Redis writer is NOT a SQL miss.
+
+    Strict real Redis and PG17; the two stores are observed independently.
+    This test deliberately does not accept arbitrary exceptions as denial.
+    """
+    from se.src.infrastructure.config.schemas import DriverConfig
+    from se.src.infrastructure.storage.drivers.redis.driver import RedisDriver
+    from se.src.infrastructure.storage.interfaces.cache import CacheWriteNotDispatched
+
+    async def run():
+        redis_url, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-cold-legacy-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        old = redis.Redis.from_url(redis_url, decode_responses=True)
+        reader = None
+        try:
+            assert await old.ping(), "S04_HARNESS_ERROR: physical Redis missing"
+            original = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "legacy"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await old.set(key, original, ex=300) is True
+            assert await old.get(key) == original
+            assert await old.ttl(key) > 0
+            assert await _row_count(engine, email) == 0
+
+            # The modern instance's *own* SET was not dispatched, but a
+            # DIFFERENT legacy instance may already have issued in Redis.
+            cold = RedisDriver(DriverConfig(options={"url": redis_url}))
+            assert cold._client is None
+            modern = OTPStorageService(cold, _factory(engine))
+            outcome = "ACKED"
+            try:
+                await getattr(modern, save)(email, {"value": "modern-sql"}, "222222")
+            except CacheWriteNotDispatched:
+                outcome = "REJECTED"
+            # Any other exception is not accepted as a security denial.
+            assert await old.get(key) == original, (
+                "S04_SEMANTIC_RED: cold writer replaced legacy Redis OTP"
+            )
+            assert await old.ttl(key) > 0
+            sql_count = await _row_count(engine, email)
+            reader = await _redis_driver(redis_url)
+            verifier = OTPStorageService(reader, _factory(engine))
+            first = await getattr(verifier, verify)(email, "111111")
+            second = await getattr(verifier, verify)(email, "222222")
+            replay = await getattr(verifier, verify)(email, "111111")
+            assert first == {"value": "legacy"}, "S04_HARNESS_ERROR: legacy positive control failed"
+            assert second is None, (
+                "S04_SEMANTIC_RED: live legacy Redis OTP and cold modern "
+                f"SQL fallback authenticated a second OTP ({purpose}; SQL rows={sql_count})"
+            )
+            assert replay is None, "S04_SEMANTIC_RED: legacy OTP replayed"
+            assert sql_count == 0, (
+                "S04_SEMANTIC_RED: second SQL OTP authority persisted while "
+                f"legacy Redis key was live ({purpose})"
+            )
+            assert outcome == "REJECTED", (
+                "S04_SEMANTIC_RED: cold Redis issuance falsely ACKed "
+                f"an independent SQL OTP ({purpose})"
+            )
+        finally:
+            if reader is not None:
+                await reader.disconnect()
+            await old.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await old.aclose()
+            await engine.dispose()
+
+    asyncio.run(run())
