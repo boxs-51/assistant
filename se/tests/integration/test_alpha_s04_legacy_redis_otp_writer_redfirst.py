@@ -636,3 +636,145 @@ def test_s04_acl_shared_credentials_rollback_hazard_control(purpose):
             await admin.aclose()
             await engine.dispose()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_acl_failover_stale_replica_hazard_and_node_local_revocation(purpose):
+    """Real Redis master/replica manual promotion, NOT Sentinel or rollout proof.
+
+    First show stale candidate ACL can authorize old SET after promotion.
+    Then apply independent ACL revocation on the promoted node, and prove
+    old writer DENIED and modern NX/GETDEL one-time positive.
+    """
+    import os
+    from redis.exceptions import ResponseError
+
+    async def run():
+        if os.environ.get("S04_FAILOVER_STRICT") != "1":
+            pytest.fail("S04_FAILOVER_HARNESS_ERROR: strict physical gate required")
+        _targets()  # Separate Redis/PG17 disposable authority preflight.
+        hostname = os.environ.get("S04_FAILOVER_MASTER_NAME")
+        assert hostname and hostname.startswith("s04-acl-master-"), (
+            "S04_FAILOVER_HARNESS_ERROR: master hostname unavailable"
+        )
+        primary = redis.Redis(host="127.0.0.1", port=6381, db=15,
+                              decode_responses=True)
+        secondary = redis.Redis(host="127.0.0.1", port=6382, db=15,
+                                decode_responses=True)
+        suffix = uuid4().hex[:14]
+        old_user, new_user = "s04fo_old_" + suffix, "s04fo_new_" + suffix
+        old_password, new_password = uuid4().hex, uuid4().hex
+        email = f"s04fo-{uuid4().hex}@example.invalid"
+        key = ("pending_password_reset:" if purpose == "password_reset"
+               else "pending_reg:") + email
+        old_on_primary = None
+        old_on_promoted = None
+        modern_on_promoted = None
+        created_primary, created_secondary = False, False
+
+        async def wait_replica():
+            for _ in range(120):
+                info = await secondary.info("replication")
+                if (info.get("role") == "slave"
+                        and info.get("master_link_status") == "up"):
+                    return
+                await asyncio.sleep(0.25)
+            pytest.fail("S04_FAILOVER_HARNESS_ERROR: replica link never READY")
+
+        async def wait_value(value):
+            for _ in range(100):
+                if await secondary.get(key) == value:
+                    return
+                await asyncio.sleep(0.1)
+            pytest.fail("S04_FAILOVER_HARNESS_ERROR: replication data not witnessed")
+
+        async def acl(admin, user, password, writable):
+            grants = ["+ping", "+select", "+get", "+ttl"]
+            if writable:
+                grants.extend(("+set", "+getdel"))
+            assert await admin.execute_command(
+                "ACL", "SETUSER", user, "reset", "on", ">" + password,
+                "~pending_reg:*", "~pending_password_reset:*", *grants
+            )
+
+        try:
+            assert await primary.ping() and await secondary.ping()
+            assert str((await primary.info("server"))["redis_version"]).startswith("7.4.")
+            assert str((await secondary.info("server"))["redis_version"]).startswith("7.4.")
+            assert (await primary.info("replication"))["role"] == "master"
+            await wait_replica()
+            await acl(primary, old_user, old_password, True)
+            created_primary = True
+            await acl(secondary, old_user, old_password, True)
+            created_secondary = True
+            old_on_primary = redis.Redis(
+                host="127.0.0.1", port=6381, db=15,
+                username=old_user, password=old_password,
+                decode_responses=True
+            )
+            assert await old_on_primary.ping()
+            modern_original = json.dumps({
+                "purpose": purpose, "otp": "222222",
+                "user_data": {"value": "acknowledged-before-promotion"}
+            })
+            assert await primary.set(key, modern_original, ex=300, nx=True) is True
+            await wait_value(modern_original)
+
+            # Cut off the old principal on master only; independently
+            # configure stale privileges on candidate replica as an adversary.
+            await acl(primary, old_user, old_password, False)
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old_on_primary.set(key, "old-master-blocked", ex=300)
+            await acl(secondary, old_user, old_password, True)
+            assert await secondary.execute_command("REPLICAOF", "NO", "ONE")
+            assert (await secondary.info("replication"))["role"] == "master"
+            old_on_promoted = redis.Redis(
+                host="127.0.0.1", port=6382, db=15,
+                username=old_user, password=old_password,
+                decode_responses=True
+            )
+            assert await old_on_promoted.ping()
+            # NEGATIVE CONTROL: stale ACL on promoted node permits unsafe SET.
+            assert await old_on_promoted.set(key, "old-after-promotion", ex=300) is True
+            assert await secondary.get(key) == "old-after-promotion", (
+                "S04_FAILOVER_HARNESS_ERROR: stale replica ACL hazard absent"
+            )
+
+            # Trusted control must revoke on the ACTUAL promoted node.
+            await acl(secondary, old_user, old_password, False)
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old_on_promoted.set(key, "late-after-revocation", ex=300)
+            assert await secondary.getdel(key) == "old-after-promotion"
+            await acl(secondary, new_user, new_password, True)
+            modern_on_promoted = redis.Redis(
+                host="127.0.0.1", port=6382, db=15,
+                username=new_user, password=new_password,
+                decode_responses=True
+            )
+            assert await modern_on_promoted.ping()
+            assert await modern_on_promoted.set(
+                key, "new-promoted-epoch", ex=300, nx=True
+            ) is True
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old_on_promoted.set(key, "old-rollback", ex=300)
+            assert await modern_on_promoted.getdel(key) == "new-promoted-epoch"
+            assert await modern_on_promoted.getdel(key) is None
+        finally:
+            if old_on_primary is not None:
+                await old_on_primary.aclose()
+            if old_on_promoted is not None:
+                await old_on_promoted.aclose()
+            if modern_on_promoted is not None:
+                await modern_on_promoted.aclose()
+            await primary.delete(key)
+            await secondary.delete(key)
+            if created_primary:
+                await primary.execute_command("ACL", "DELUSER", old_user)
+            if created_secondary:
+                await secondary.execute_command("ACL", "DELUSER", old_user, new_user)
+            # Restore physical follower for the next parametrized test.
+            await secondary.execute_command("REPLICAOF", hostname, 6379)
+            await wait_replica()
+            await secondary.aclose()
+            await primary.aclose()
+    asyncio.run(run())
