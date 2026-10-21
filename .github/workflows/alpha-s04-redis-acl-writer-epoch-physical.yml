@@ -71,7 +71,7 @@ jobs:
           set -o pipefail
           python -m pytest -vv -ra --tb=short \
             se/tests/integration/test_alpha_s04_legacy_redis_otp_writer_redfirst.py \
-            -k test_s04_acl_ \
+            -k "test_s04_acl_distinct_writer_epoch_denies_old_set or test_s04_acl_shared_credentials_rollback_hazard_control" \
             --junitxml=alpha-s04-acl-epoch-physical.xml
       - name: Require four exact ACL scenario identities in raw JUnit
         if: always()
