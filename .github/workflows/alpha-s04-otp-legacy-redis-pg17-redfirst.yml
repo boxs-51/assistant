@@ -102,4 +102,4 @@ jobs:
         with:
           name: alpha-s04-legacy-redis-pg17-raw
           path: alpha-s04-legacy-redis-physical.xml
-          if-no-files-found: warn
+          if-no-files-found: error
