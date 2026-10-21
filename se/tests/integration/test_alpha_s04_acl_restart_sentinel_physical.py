@@ -121,7 +121,7 @@ def test_s04_acl_restart_writer_epoch_persistence(purpose, persistence):
                                                        old_user, "-set")
                     await _deny_set(old, key)
                     if persistence == "saved":
-                        assert await admin.execute_command("ACL", "SAVE") is True
+                        assert await admin.execute_command("ACL", "SAVE") == "OK"
                     assert await admin.set(key, "modern-acknowledged",
                                            ex=300) is True
                 finally:

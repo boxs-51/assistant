@@ -34,7 +34,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$S04_EXPECTED_HEAD"
           printf 'S04_EXACT_HEAD=%s\n' "$(git rev-parse HEAD)"
-          test "S04_SENTINEL_STRICT" = "S04_SENTINEL_STRICT" # static source-path canary
+          test "$S04_SENTINEL_STRICT" = "1"
           docker version
           docker info --format '{{.ServerVersion}}'
       - name: Execute four exact Redis Sentinel automatic failover ACL physical cases
