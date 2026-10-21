@@ -111,7 +111,10 @@ def test_p1_real_upgrade_replay_and_downgrade_does_not_revoke_grants(
     script = ScriptDirectory.from_config(config)
     # The two audited tips remain intact under one explicit merge-only head.
     # Refuse missing, unknown, or silently reparented migration branches.
-    assert script.get_heads() == ["32a_alpha_31b_31t_merge"]
+    assert script.get_heads() == ["32b_alpha_s03_owner_integrity"]
+    assert script.get_revision("32b_alpha_s03_owner_integrity").down_revision == (
+        "32a_alpha_31b_31t_merge"
+    )
     assert script.get_revision("32a_alpha_31b_31t_merge").down_revision == (
         "31b_aic0_pg_guard_forward",
         REVISION,

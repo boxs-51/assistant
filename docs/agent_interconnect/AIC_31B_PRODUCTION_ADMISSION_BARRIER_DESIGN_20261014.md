@@ -1,3 +1,7 @@
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:START -->
+> **RETIRED / NON-NORMATIVE historical governance.** The former policy #85 is not active and does not grant authority or restore retired instructions. Historical P0/P1/HOLD technical safeguards, test expectations, security oracles, and independently enforced GitHub restrictions remain effective on their own terms.
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:END -->
+
 # AIC 31b — Production admission barrier implementation design (issue #381)
 
 **Status:** DESIGN ONLY / NOT DEPLOYED / NOT OPERATOR-SIGNED / SOURCE FINAL HOLD / NO MERGE / AGENT NATIVE DENY.  

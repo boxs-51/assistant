@@ -131,7 +131,9 @@ def test_r8_d_fork_admission_migration_is_empty_and_reversible(
     database = tmp_path / "r8_d_migration.sqlite"
     config = _upgrade_to_14b(database, monkeypatch)
 
-    command.upgrade(config, "head")
+    # 14d adds the two runtime seed columns asserted by this legacy R8-D/E oracle.
+    # Remain below all later migrations (notably forward-only S03).
+    command.upgrade(config, "14d_r8_fork_runtime_seed")
 
     connection = sqlite3.connect(database)
     try:

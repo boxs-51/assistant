@@ -36,7 +36,7 @@ from se.src.infrastructure.storage.repositories.memory import (
 )
 
 ROOT = Path(__file__).resolve().parents[3]
-BASE_HEAD = "30a_ctx_f5_user_wide_memory_scope"
+BASE_HEAD = "32b_alpha_s03_owner_integrity"
 FIELDS = (
     "memory_id", "promotion_authority_id", "memory_schema_version",
     "owner_user_id", "memory_scope", "source_context_source_id",

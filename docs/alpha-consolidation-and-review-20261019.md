@@ -1,3 +1,7 @@
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:START -->
+> **RETIRED / NON-NORMATIVE historical governance.** Policy #85 is no longer in effect. Historical P0/P1/HOLD technical constraints, security guards and test expectations remain in force independently; no authority for privileged access, merge or deployment is created.
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:END -->
+
 # ALPHA consolidation and architecture/error review — 2026-10-19
 
 **Document ID:** ALPHA-REV-20261019-R1  

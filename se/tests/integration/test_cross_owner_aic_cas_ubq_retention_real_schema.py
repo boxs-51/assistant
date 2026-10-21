@@ -19,7 +19,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ROOT = Path(__file__).resolve().parents[3]
-HEAD = "31b_aic0_pg_guard_forward"
+HEAD = "32b_alpha_s03_owner_integrity"
 
 
 def alembic_upgrade(url):

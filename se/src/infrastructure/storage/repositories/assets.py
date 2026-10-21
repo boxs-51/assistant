@@ -432,7 +432,19 @@ class AssetRepository:
         expected_state: str,
         expected_live_claim_token: Optional[str],
         values: Mapping[str, Any],
+        expected_owner_user_id: Optional[str] = None,
+        expected_source_blob_id: Optional[str] = None,
+        expected_source_sha256: Optional[str] = None,
     ) -> Optional[FileProviderBindingRecord]:
+        # The durable provider binding identity and canonical source
+        # fingerprint never change through a lifecycle compare-and-set.
+        # Deny the write before SQL, even if a caller supplied a new state.
+        immutable = {
+            "id", "file_id", "provider_name", "provider_namespace",
+            "source_blob_id", "source_sha256",
+        }
+        if immutable.intersection(values):
+            raise ValueError("CAS_PROVIDER_BINDING_IMMUTABLE_FIELD")
         predicates = [
             FileProviderBindingRecord.id == binding_id,
             FileProviderBindingRecord.revision == expected_revision,
@@ -446,6 +458,34 @@ class AssetRepository:
             predicates.append(
                 FileProviderBindingRecord.live_claim_token
                 == expected_live_claim_token
+            )
+
+        if expected_owner_user_id is not None:
+            # Correlate the ACTIVE transition against durable canonical file
+            # ownership, blob lineage and the claim's original fingerprint.
+            # The condition belongs in the same SQL UPDATE as the CAS fence,
+            # rather than in a separate preflight read that can become stale.
+            if not expected_source_blob_id or not expected_source_sha256:
+                raise ValueError("CAS_MISSING_CANONICAL_SOURCE_FENCE")
+            predicates.append(
+                select(FileAssetRecord.id)
+                .join(
+                    FileBlobRecord,
+                    FileAssetRecord.blob_id == FileBlobRecord.id,
+                )
+                .where(
+                    FileAssetRecord.id == FileProviderBindingRecord.file_id,
+                    FileAssetRecord.owner_user_id == expected_owner_user_id,
+                    FileAssetRecord.blob_id == expected_source_blob_id,
+                    FileAssetRecord.state == "READY",
+                    FileBlobRecord.state == "READY",
+                    FileBlobRecord.sha256 == expected_source_sha256,
+                    FileProviderBindingRecord.source_blob_id
+                    == expected_source_blob_id,
+                    FileProviderBindingRecord.source_sha256
+                    == expected_source_sha256,
+                )
+                .exists()
             )
 
         next_values = dict(values)
@@ -514,16 +554,30 @@ class AssetRepository:
         expected_revision: int,
         expected_state: str,
         values: Mapping[str, Any],
+        expected_owner_user_id: Optional[str] = None,
+        expected_blob_id: Optional[str] = None,
     ) -> Optional[FileAssetRecord]:
+        # Asset identity, tenant ownership and canonical blob lineage are
+        # immutable. Caller-provided values may only advance lifecycle state.
+        if {"id", "owner_user_id", "blob_id"}.intersection(values):
+            raise ValueError("CAS_FILE_IMMUTABLE_FIELD")
+        if expected_owner_user_id is not None and not expected_blob_id:
+            raise ValueError("CAS_MISSING_EXPECTED_FILE_BLOB")
+        predicates = [
+            FileAssetRecord.id == file_id,
+            FileAssetRecord.revision == expected_revision,
+            FileAssetRecord.state == expected_state,
+        ]
+        if expected_owner_user_id is not None:
+            predicates.append(
+                FileAssetRecord.owner_user_id == expected_owner_user_id
+            )
+            predicates.append(FileAssetRecord.blob_id == expected_blob_id)
         next_values = dict(values)
         next_values["revision"] = expected_revision + 1
         result = await self.session.execute(
             update(FileAssetRecord)
-            .where(
-                FileAssetRecord.id == file_id,
-                FileAssetRecord.revision == expected_revision,
-                FileAssetRecord.state == expected_state,
-            )
+            .where(*predicates)
             .values(**next_values)
             .returning(FileAssetRecord)
         )

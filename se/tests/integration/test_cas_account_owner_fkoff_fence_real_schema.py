@@ -23,7 +23,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ROOT = Path(__file__).resolve().parents[3]
-ALEMBIC_HEAD = "31b_aic0_pg_guard_forward"
+ALEMBIC_HEAD = "32b_alpha_s03_owner_integrity"
 FILE_STATES = (
     "STAGING", "READY", "QUARANTINED", "DELETING", "DELETED", "ERROR",
 )

@@ -229,7 +229,7 @@ def test_r8_a_backfills_cases_a_b_c_and_downgrades_losslessly(
     finally:
         connection.close()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "14a_r8_task_branch")
 
     connection = sqlite3.connect(database)
     try:

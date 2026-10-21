@@ -312,6 +312,9 @@ class CanonicalAssetHydrationService:
 
         return await self._finalize_success(
             asset_id=asset_id,
+            owner_user_id=owner_user_id,
+            claim_blob_id=claim_blob_id,
+            claim_sha256=claim_sha256,
             provider_name=provider_name,
             provider_namespace=provider_namespace,
             claim_id=claim_id,
@@ -746,6 +749,9 @@ class CanonicalAssetHydrationService:
         self,
         *,
         asset_id: str,
+        owner_user_id: str,
+        claim_blob_id: str,
+        claim_sha256: str,
         provider_name: str,
         provider_namespace: str,
         claim_id: str,
@@ -774,6 +780,9 @@ class CanonicalAssetHydrationService:
                 expected_revision=claim_revision,
                 expected_state="PROCESSING",
                 expected_live_claim_token="LIVE",
+                expected_owner_user_id=owner_user_id,
+                expected_source_blob_id=claim_blob_id,
+                expected_source_sha256=claim_sha256,
                 values={
                     "state": "ACTIVE",
                     "provider_file_id": outcome.provider_file_id,

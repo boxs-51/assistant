@@ -1,0 +1,210 @@
+name: Alpha S03 Owner Integrity Real Schema RED-first
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# Supersede stale PR checks for this workflow only; manual runs remain independent.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-owner-matrix:
+    name: SQLite CTX CAS UBQ owner negatives / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Attest exact HEAD
+        run: python -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['EXPECTED_HEAD']"
+      - name: Real SQLite owner retention FK OFF ON and recursive OFF ON
+        run: python -m pytest -q -ra se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_ubq_owner_rekey_fkoff_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py se/tests/integration/test_alpha_s03_owner_recovery.py -k "not pg17 and not postgresql" -o xfail_strict=true --junitxml=s03-sqlite-owner-raw.xml
+      - name: Capture SQLite exact HEAD attestation
+        if: always()
+        run: git rev-parse HEAD > s03-sqlite-head.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s03-owner-sqlite-${{ matrix.os }}-raw
+          path: |
+            s03-sqlite-owner-raw.xml
+            s03-sqlite-head.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  pg17-owner-matrix:
+    name: PG17 real schema CTX CAS cross-owner / Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: s03_ci
+          POSTGRES_DB: s03_migration_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U s03_ci -d s03_migration_ci"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://s03_ci@127.0.0.1:5432/s03_migration_ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Attest exact HEAD and disposable PG17
+        run: |
+          python - <<'PY'
+          import os, subprocess
+          from sqlalchemy.engine import make_url
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == os.environ['EXPECTED_HEAD']
+          u = make_url(os.environ['AIC_TEST_POSTGRES_URL'])
+          assert (u.drivername,u.host,u.port,u.username,u.database,u.password) == (
+              'postgresql+asyncpg','127.0.0.1',5432,'s03_ci','s03_migration_ci',None
+          )
+          PY
+      - name: PG17 populated history owner negative matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q -ra -o xfail_strict=true se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py se/physical/s03_pg17_recovery.py -k "pg17 or postgresql or template_copy" --junitxml=s03-pg17-owner-raw.xml | tee s03-pg17-pytest.log
+      - name: Capture PG17 checkout attestation
+        if: always()
+        run: git rev-parse HEAD > s03-pg17-head.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s03-owner-pg17-linux-raw
+          path: |
+            s03-pg17-owner-raw.xml
+            s03-pg17-head.txt
+            s03-pg17-pytest.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  portable-architecture-linux:
+    name: S03 dual-lane portable Architecture Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Attest exact HEAD
+        run: python -c "import os,subprocess; assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['EXPECTED_HEAD']"
+      - name: Full portable Architecture Linux with exact PG17 case handoff
+        shell: bash
+        run: >-
+          set -o pipefail; python -m pytest -q
+          --ignore=se/tests/integration/test_ae359_utc_naive_pg17_redfirst.py
+          --ignore=se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py
+          --ignore=se/tests/integration/test_ae359_post_ack_loss_physical.py
+          --deselect=se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py::test_cas_retained_owner_fkoff_and_provider_link_physical_guard[CAS-only-postgresql17]
+          --deselect=se/tests/integration/test_cas_account_owner_fkoff_fence_real_schema.py::test_cas_retained_owner_fkoff_and_provider_link_physical_guard[CAS-and-UBQ-postgresql17]
+          --deselect=se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py::test_real_schema_retired_aic_cas_provider_ubq_delete_rekey_and_hardexit[False-postgresql]
+          --deselect=se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py::test_real_schema_retired_aic_cas_provider_ubq_delete_rekey_and_hardexit[True-postgresql]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[child_first-DELETE]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[child_first-REKEY]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[parent_first-DELETE]
+          --deselect=se/tests/integration/test_ctx_user_wide_owner_retention_real_schema.py::test_ctx_only_pg17_parent_child_two_pid_physical[parent_first-REKEY]
+          --junitxml=s03-portable-owner-raw.xml | tee s03-portable-pytest.log
+      - name: Capture checkout attestation
+        if: always()
+        run: git rev-parse HEAD > s03-portable-head.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s03-owner-portable-linux-raw
+          path: |
+            s03-portable-owner-raw.xml
+            s03-portable-head.txt
+            s03-portable-pytest.log
+          if-no-files-found: error
+          retention-days: 7
+
+  s03-dual-lane-proof:
+    name: S03 Dual-Lane Composite Evidence (all required S03 owner jobs)
+    needs: [sqlite-owner-matrix, pg17-owner-matrix, portable-architecture-linux]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Download same-run PG17 JUnit and attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: s03-owner-pg17-linux-raw
+          path: proof/pg17
+      - name: Download same-run portable JUnit and attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: s03-owner-portable-linux-raw
+          path: proof/portable
+      - name: Download same-run Linux SQLite physical JUnit and attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: s03-owner-sqlite-ubuntu-24.04-raw
+          path: proof/sqlite-linux
+      - name: Download same-run Windows SQLite physical JUnit and attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: s03-owner-sqlite-windows-2022-raw
+          path: proof/sqlite-windows
+      - name: Fail-closed exact-head oracle and JUnit proof
+        run: >-
+          python se/physical/s03_dual_lane_gate.py
+          --physical proof/pg17/s03-pg17-owner-raw.xml
+          --portable proof/portable/s03-portable-owner-raw.xml
+          --physical-output proof/pg17/s03-pg17-pytest.log
+          --portable-output proof/portable/s03-portable-pytest.log
+          --physical-head proof/pg17/s03-pg17-head.txt
+          --portable-head proof/portable/s03-portable-head.txt
+          --sqlite-linux proof/sqlite-linux/s03-sqlite-owner-raw.xml
+          --sqlite-windows proof/sqlite-windows/s03-sqlite-owner-raw.xml
+          --sqlite-linux-head proof/sqlite-linux/s03-sqlite-head.txt
+          --sqlite-windows-head proof/sqlite-windows/s03-sqlite-head.txt

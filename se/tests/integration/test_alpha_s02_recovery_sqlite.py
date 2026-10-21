@@ -34,7 +34,7 @@ def interrupt(conn, cursor, statement, parameters, context, executemany):
 cfg = Config(str(Path(os.environ["S02_REPO_ROOT"]) / "alembic.ini"))
 cfg.set_main_option("script_location", str(Path(os.environ["S02_REPO_ROOT"]) /
     "se/src/infrastructure/storage/migrations/sql"))
-command.upgrade(cfg, "head")
+command.upgrade(cfg, "32a_alpha_31b_31t_merge")
 raise SystemExit(99)  # Injection was not reached: FAIL CLOSED.
 """
 
@@ -138,8 +138,8 @@ def test_s02_sqlite_crash_then_restart_from_disposable_backup(tmp_path, monkeypa
     assert _versions(seed) == {AIC}, "Backup source must remain untouched"
 
     cfg = _config(monkeypatch, clone)
-    command.upgrade(cfg, "head")  # Fresh migrator process / new DB connection.
-    command.upgrade(cfg, "head")  # Idempotent restart.
+    command.upgrade(cfg, MERGE)  # Fresh migrator process / new DB connection.
+    command.upgrade(cfg, MERGE)  # Idempotent restart.
     assert _versions(clone) == {MERGE}
     _check_data(clone, grants, permission=1)
     _assert_owner_denied(clone)
@@ -153,7 +153,7 @@ def test_s02_sqlite_rollback_merge_only_and_reupgrade_on_copy(
     clone = tmp_path / "rollback-copy.sqlite"
     _copy_db(seed, clone)
     cfg = _config(monkeypatch, clone)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, MERGE)
     assert _versions(clone) == {MERGE}
     _check_data(clone, grants, permission=1)
 
@@ -163,7 +163,7 @@ def test_s02_sqlite_rollback_merge_only_and_reupgrade_on_copy(
     command.downgrade(cfg, AIC)  # Undo ONLY merge marker, keep both parents.
     assert _versions(clone) == {AIC, TERMINAL}
     _check_data(clone, grants, permission=1)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, MERGE)
     assert _versions(clone) == {MERGE}
     _check_data(clone, grants, permission=1)
     _assert_owner_denied(clone)

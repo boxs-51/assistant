@@ -24,7 +24,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ROOT = Path(__file__).resolve().parents[3]
-ALEMBIC_HEAD = "31b_aic0_pg_guard_forward"
+ALEMBIC_HEAD = "32b_alpha_s03_owner_integrity"
 MODES = (
     pytest.param(0, 0, id="FK-OFF-recursive-OFF"),
     pytest.param(0, 1, id="FK-OFF-recursive-ON"),
