@@ -21,7 +21,7 @@ Never make old PR unmerged blobs an automatic source of truth. A dirty/stale com
 | S09 | Integrated end-to-end readiness, #655 and all earlier | exact merged-alpha full regression and decision packet | Full Linux/Windows/PG17/Redis/SQLite/OS physical oracles, rollback, architecture review; any P0/P1/security HOLD keeps release BLOCKED. |
 
 ## Why this is linear, not an artificial single global security lock
-Stage sequence controls **promotion of changes and delivery claims**, not unrelated read-only design/research. If stage S03 remains blocked, downstream source promotions that consume its schema are HOLD; independent documentation and evidence gathering may continue, explicitly UNVERIFIED and non-promotion. No generic upstream failure is permission to disable all unrelated safe API surfaces or to bypass real per-resource controls.
+Stage sequence controls **promotion of changes and delivery claims**, not unrelated read-only design/research. If a prerequisite is blocked, downstream source promotions dependent on its unproven boundary remain HOLD; independent documentation and evidence collection may continue, explicitly UNVERIFIED and non-promotion. No generic upstream failure is permission to disable all unrelated safe API surfaces or to bypass real per-resource controls.
 
 ## Branch discipline
 1. S00 documentation is published directly to development-only alpha on Owner request, with no functional changes.
@@ -35,7 +35,14 @@ Stage sequence controls **promotion of changes and delivery claims**, not unrela
 stage_id, parent_issue, requirement_contract, exact_base_sha, changed_paths, RED_run, GREEN_run, Linux/Windows/PG17/Redis matrix, evidence tier, negative-oracle identity, doc_delta, reviewer_provenance, task_verdict, subject_verdict, blockers, rollback, next_stage_ready. Allowed gate values PASS/REVISE/STOP/UNVERIFIED; no skipped gate silently becomes PASS.
 
 ## Existing evidence and unverified claims
-AIC467 exact prior alpha PG17 run 39258636299 succeeded. Prior PR #648 Linux architecture run 39157350888 failed on a different HEAD. Neither is exact normalized-doc alpha full-system PASS. Migrations have two heads, and Native and OTP physical release claims remain HOLD.
+AIC467 exact prior alpha PG17 run 39258636299 succeeded. Prior PR #648 Linux architecture run 39157350888 failed on a different HEAD. Neither is exact normalized-doc alpha full-system PASS. Migrations **historically had** two heads before S02; 32a reconciled 31b/31t and 32b follows in alpha. Native and OTP physical **release** claims remain HOLD.
+
+## 2026-10-21 exact-alpha stage gate reconciliation
+- Evidence base: `alpha@300801d67c43d702408d2895f7c89898e27a87fd`. S02 merge-only 32a (PR #667) and S03 forward-only 32b (PR #668) are present; no live/production migration authorized.
+- S01 #658: **CLOSED evidence inventory only** (historic full-suite RED preserved). S02 #659: **PASS_SCOPED/MERGED_ALPHA**. S03 #660: **PASS_SCOPED/MERGED_ALPHA**. S04 #661: **HOLD/NOT_STARTED** pending Owner-requested alpha maintenance; S05–S09 unfulfilled.
+- Codex Code Review on #668 when Ready at `a7b4a5c8` completed with zero findings; **Security Review not run**. Experimental alpha does not require external verifier or protected-branch admission; this is not release approval.
+- PR-head S03 dual-lane + Architecture PASS is not the same as merge-head proof. Post-merge AIC467 PG17 Linux+Windows passed 58 tests each; full merge-SHA S03/Architecture **NOT_RUN**, tracked by #655/#665.
+- [Branch custody audit](BRANCH_CLEANUP_AUDIT_20261021.md) classifies ref deletion readiness. No ref deletion, main merge or deploy is implied.
 
 ## Live issue-to-stage link map (tracking identifiers, not PASS)
 | Stage | Issue | Original parent and dependency |
