@@ -5,7 +5,7 @@ from redis.exceptions import RedisError, NoScriptError
 from typing import Any, Optional, Dict
 
 from ....config.schemas import DriverConfig
-from ...interfaces.cache import CacheDriver, CacheWriteNotDispatched
+from ...interfaces.cache import CacheDriver, CacheWriteNotDispatched, CacheWriteCollision
 
 logger = structlog.get_logger(__name__)
 
@@ -146,11 +146,20 @@ class RedisDriver(CacheDriver):
         client = self._require_client()
 
         try:
-            receipt = await client.set(
-                key,
-                value,
-                ex=expire,
+            # A previously deployed/unfenced writer can leave a live OTP
+            # without the modern PG17 issuance reservation. An atomic SET NX
+            # is essential: GET then SET is a TOCTOU overwrite hazard.
+            # Do not alter ordinary cache/cooldown set semantics.
+            one_time_challenge = key.startswith(
+                ("pending_reg:", "pending_password_reset:")
             )
+            receipt = await client.set(
+                key, value, ex=expire, nx=one_time_challenge
+            )
+            if one_time_challenge and receipt is None:
+                # Redis NX denied the write: previous challenge still live.
+                # This is NOT a transport failure that permits SQL fallback.
+                raise CacheWriteCollision("Live OTP already exists; issuance denied")
             if receipt is not True:
                 # A missing/false/invalid SET reply is never a confirmed OTP.
                 # This is still post-dispatch uncertainty, not SQL fallback.
