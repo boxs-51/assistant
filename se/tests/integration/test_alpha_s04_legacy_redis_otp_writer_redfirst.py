@@ -209,3 +209,165 @@ def test_s04_legacy_first_cold_redis_must_not_issue_second_sql_otp(purpose):
             await engine.dispose()
 
     asyncio.run(run())
+
+# Mixed-version/admission questions are separately scoped from the
+# F-670-SEC-01 fix above. These are real Redis/PG17 semantic RED-first tests:
+# modern DB-only + older Redis, and old unconditional SET after new NX.
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_db_only_with_live_legacy_must_not_double_redeem(purpose):
+    """DB-only modern issuance cannot mint a second OTP alongside legacy Redis."""
+    async def run():
+        redis_url, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-db-only-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        legacy = redis.Redis.from_url(redis_url, decode_responses=True)
+        reader = None
+        try:
+            assert await legacy.ping(), "S04_HARNESS_ERROR: Redis unavailable"
+            old = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "legacy"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await legacy.set(key, old, ex=300) is True
+            assert await legacy.get(key) == old
+            assert await legacy.ttl(key) > 0
+            assert await _row_count(engine, email) == 0
+
+            modern_db_only = OTPStorageService(None, _factory(engine))
+            # A real SQL-only deployment used alongside a Redis-backed old
+            # binary is not proven to own the sole issuance authority.
+            await getattr(modern_db_only, save)(
+                email, {"value": "db-only-modern"}, "222222"
+            )
+            rows = await _row_count(engine, email)
+            reader = await _redis_driver(redis_url)
+            verifier = OTPStorageService(reader, _factory(engine))
+            original = await getattr(verifier, verify)(email, "111111")
+            second = await getattr(verifier, verify)(email, "222222")
+            replay = await getattr(verifier, verify)(email, "111111")
+            assert original == {"value": "legacy"}, (
+                "S04_HARNESS_ERROR: legacy OTP positive control unavailable"
+            )
+            assert second is None, (
+                "S04_MIXED_SEMANTIC_RED: DB-only modern and Redis legacy "
+                f"issued separately redeemable OTPs ({purpose}; sql_rows={rows})"
+            )
+            assert replay is None, "S04_MIXED_SEMANTIC_RED: legacy OTP replayed"
+            assert rows == 0, (
+                "S04_MIXED_SEMANTIC_RED: a second SQL authority was committed "
+                f"while unfenced legacy Redis was live ({purpose})"
+            )
+        finally:
+            if reader is not None:
+                await reader.disconnect()
+            await legacy.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await legacy.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_legacy_late_set_must_not_replace_modern_ack(purpose):
+    """An old unconditional Redis SET must not invalidate acknowledged modern NX."""
+    async def run():
+        redis_url, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-late-old-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        old_writer = redis.Redis.from_url(redis_url, decode_responses=True)
+        modern_driver = None
+        try:
+            assert await old_writer.ping(), "S04_HARNESS_ERROR: Redis unavailable"
+            modern_driver = await _redis_driver(redis_url)
+            modern = OTPStorageService(modern_driver, _factory(engine))
+            await getattr(modern, save)(
+                email, {"value": "modern-acknowledged"}, "222222"
+            )
+            modern_value = await old_writer.get(key)
+            assert modern_value is not None, (
+                "S04_HARNESS_ERROR: modern positive did not create OTP"
+            )
+            assert json.loads(modern_value)["otp"] == "222222"
+            assert await old_writer.ttl(key) > 0
+
+            # Genuine old Redis wire command: no SQL fence, no NX flag.
+            # This is NOT a real historical Python binary.
+            legacy_payload = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "old-late-writer"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await old_writer.set(key, legacy_payload, ex=300) is True
+            observed_after = await old_writer.get(key)
+            assert observed_after == modern_value, (
+                "S04_MIXED_SEMANTIC_RED: legacy SET overwrote a live "
+                f"acknowledged modern OTP ({purpose})"
+            )
+            verifier = OTPStorageService(modern_driver, _factory(engine))
+            assert await getattr(verifier, verify)(email, "222222") == {
+                "value": "modern-acknowledged"
+            }, "S04_MIXED_SEMANTIC_RED: modern acknowledged OTP was invalidated"
+            assert await getattr(verifier, verify)(email, "111111") is None, (
+                "S04_MIXED_SEMANTIC_RED: late legacy OTP gained authority"
+            )
+        finally:
+            if modern_driver is not None:
+                await modern_driver.disconnect()
+            await old_writer.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await old_writer.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_isolated_sql_only_positive_control(purpose):
+    """Healthy DB-only deployment remains useful, but is not mixed-mode proof."""
+    async def run():
+        _, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-sql-control-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        try:
+            sql_only = OTPStorageService(None, _factory(engine))
+            await getattr(sql_only, save)(
+                email, {"value": "sql-only-control"}, "333333"
+            )
+            assert await _row_count(engine, email) == 1
+            assert await getattr(sql_only, verify)(email, "333333") == {
+                "value": "sql-only-control"
+            }
+            assert await getattr(sql_only, verify)(email, "333333") is None
+            assert await _row_count(engine, email) == 0
+        finally:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await engine.dispose()
+    asyncio.run(run())
