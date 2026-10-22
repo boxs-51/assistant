@@ -1,0 +1,92 @@
+name: Alpha S04 T06 PG17 role and epoch fence reference physical
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_t06_role_epoch_fence_reference_physical.py"
+      - ".github/workflows/alpha-s04-t06-role-epoch-fence-physical.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t06-pg17-disposable-fence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: s04_t06_disposable
+          POSTGRES_USER: s04_fence_admin
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U s04_fence_admin -d s04_t06_disposable"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      S04_T06_PG_DSN: postgresql://s04_fence_admin@127.0.0.1:5432/s04_t06_disposable
+      S04_T06_STRICT: "1"
+      S04_T06_DISPOSABLE: "1"
+      S04_T06_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install isolated physical dependencies
+        run: python -m pip install "pytest==9.0.2" "asyncpg==0.31.0"
+      - name: Attest exact checkout and nine fixed test identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$S04_T06_EXPECTED_SHA"
+          python -m pytest --collect-only -q se/tests/integration/s04_t06_role_epoch_fence_reference_physical.py > s04-t06-collection.txt
+          grep -q "9 tests collected" s04-t06-collection.txt
+      - name: Execute disposable PostgreSQL 17 privilege and epoch matrix
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra --tb=short se/tests/integration/s04_t06_role_epoch_fence_reference_physical.py --junitxml=s04-t06-junit.xml
+      - name: Gate exact nine-case JUnit without claiming product green
+        if: always()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          from collections import Counter
+          from pathlib import Path
+          p=Path("s04-t06-junit.xml")
+          assert p.is_file(), "S04_HARNESS_ERROR: raw JUnit absent"
+          root=ET.parse(p).getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          assert len(suites)==1, "S04_HARNESS_ERROR: one suite required"
+          cases=suites[0].findall("testcase")
+          expected=Counter({
+            "test_t06_01_pre_seal_old_sql_write_control_and_post_seal_deny":1,
+            "test_t06_02_only_v2_epoch_active_can_ack_issue":1,
+            "test_t06_03_old_cannot_execute_v2_modern_cannot_write_tables_directly":1,
+            "test_t06_04_existing_and_reconnected_old_session_both_denied":1,
+            "test_t06_05_epoch_counter_and_phase_cannot_roll_back":1,
+            "test_t06_06_untrusted_search_path_cannot_redirect_security_definer":1,
+            "test_t06_07_unique_v2_issuance_no_silent_duplicate_ack":1,
+            "test_t06_08_fence_transition_waits_for_active_issuer_transaction":1,
+            "test_t06_09_old_role_cannot_grant_itself_back_authority":1,
+          })
+          assert Counter(x.get("name") for x in cases)==expected
+          assert len(cases)==9 and all(x.get("classname","").endswith("s04_t06_role_epoch_fence_reference_physical") for x in cases)
+          assert all(suites[0].get(k)==v for k,v in {
+            "tests":"9","errors":"0","failures":"0","skipped":"0"}.items())
+          assert all(x.find(k) is None for x in cases for k in ("failure","error","skipped"))
+          print("T06_PG17_REFERENCE_9_PASS; LEGACY_REDIS_UNFENCED; PRODUCT_S04_HOLD")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-t06-pg17-role-epoch-raw
+          path: |
+            s04-t06-junit.xml
+            s04-t06-collection.txt
+          if-no-files-found: error
