@@ -235,7 +235,17 @@ def test_t06_08_fence_transition_waits_for_active_issuer_transaction():
 def test_t06_09_old_role_cannot_grant_itself_back_authority():
     async def check(dsn,a,old,modern,s,old_role,_):
         await _seal(a,s,old_role)
-        await _deny(old,f"GRANT INSERT ON {s}.legacy TO {old_role}")
+        # PostgreSQL may WARN ("no privileges were granted") rather than
+        # raise on an unauthorized GRANT. Check effective privileges, not
+        # statement completion, to reject false PASS and false RED.
+        assert await a.fetchval(
+            "SELECT has_table_privilege($1::name,$2::text,'INSERT')",
+            old_role, f"{s}.legacy") is False
+        await old.execute(f"GRANT INSERT ON {s}.legacy TO {old_role}")
+        assert await a.fetchval(
+            "SELECT has_table_privilege($1::name,$2::text,'INSERT')",
+            old_role, f"{s}.legacy") is False, (
+                "S04_SECURITY_RED: old role restored effective INSERT privilege")
         await _deny(old,f"SET ROLE s04_fence_admin")
         await _deny(old,f"INSERT INTO {s}.legacy VALUES('resurrection','old')")
         await _deny(old,f"SELECT {s}.issue_v2(2,'resurrection')")
