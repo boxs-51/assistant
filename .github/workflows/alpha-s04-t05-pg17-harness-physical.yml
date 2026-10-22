@@ -1,0 +1,92 @@
+name: Alpha S04 T05 PG17 Test-only Physical Controls
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_t05_pg17_contract_physical.py"
+      - ".github/workflows/alpha-s04-t05-pg17-harness-physical.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t05-pg17-disposable-harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: s04_t05_contract
+          POSTGRES_USER: s04_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U s04_test -d s04_t05_contract"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      S04_T05_STRICT: "1"
+      S04_T05_DISPOSABLE: "1"
+      S04_T05_PG_DSN: postgresql://s04_test@127.0.0.1:5432/s04_t05_contract
+      S04_T05_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install isolated harness dependencies
+        run: python -m pip install "pytest==9.0.2" "asyncpg==0.31.0"
+      - name: Verify exact HEAD and test identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$S04_T05_EXPECTED_SHA"
+          echo "S04_T05_HARNESS_EXACT_HEAD=$(git rev-parse HEAD)"
+          python -m pytest --collect-only -q se/tests/integration/s04_t05_pg17_contract_physical.py > s04-t05-collected.txt
+          grep -q "4 tests collected" s04-t05-collected.txt
+      - name: Run four isolated PG17 reference controls only
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra --tb=short \
+            se/tests/integration/s04_t05_pg17_contract_physical.py \
+            --junitxml=s04-t05-pg17-harness.xml
+      - name: Assert raw JUnit exact identities (not application proof)
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path("s04-t05-pg17-harness.xml")
+          assert path.is_file(), "S04_HARNESS_ERROR: physical JUnit absent"
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          cases = [case for suite in suites for case in suite.findall("testcase")]
+          expected = Counter({
+              "test_t05_01_same_operation_two_subjects_physical_control": 1,
+              "test_t05_02_idempotency_fingerprint_mismatch_physical_control": 1,
+              "test_t05_03_advisory_hash_collision_preserves_identity_physical_control": 1,
+              "test_t05_04_deadlock_negative_and_canonical_positive_physical_control": 1,
+          })
+          actual = Counter(c.attrib.get("name") for c in cases)
+          assert actual == expected, ("S04_HARNESS_ERROR: missing/duplicate IDs", actual)
+          assert all(c.attrib.get("classname", "").endswith(
+              "s04_t05_pg17_contract_physical") for c in cases), "S04_HARNESS_ERROR: source drift"
+          counts = {x: sum(c.find(x) is not None for c in cases)
+                    for x in ("failure", "error", "skipped")}
+          assert len(cases) == 4 and counts == {"failure": 0, "error": 0, "skipped": 0}, (
+              "S04_HARNESS_NOT_READY: read raw failures; NEVER mark product GREEN", counts)
+          print("S04_T05_HARNESS_READY_ONLY; PRODUCT_V2_NOT_TESTED; FOUR_CONTROLS=PASS")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-t05-pg17-disposable-raw-evidence
+          path: |
+            s04-t05-pg17-harness.xml
+            s04-t05-collected.txt
+          if-no-files-found: error
