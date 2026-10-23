@@ -93,7 +93,7 @@ def _child(payload):
 async def _launch(payload, handshake=False):
     exe=sys.executable
     proc=await asyncio.create_subprocess_exec(
-        'sudo','-n','-u','nobody','--',exe,str(Path(__file__).resolve()),'--child',
+        'sudo','-n','-u','nobody','--',exe,payload['child_script'],'--child',
         stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL)
     assert proc.stdin and proc.stdout
@@ -102,13 +102,20 @@ async def _launch(payload, handshake=False):
         await proc.stdin.drain()
         if handshake:
             line=await asyncio.wait_for(proc.stdout.readline(),8)
-            assert line.strip()==b'READY', 'S04_HARNESS_ERROR: old process failed to preopen SQLite FD'
+            if line.strip()!=b'READY':
+                await asyncio.wait_for(proc.wait(),8)
+                diagnostic=(line.decode('ascii',errors='ignore').strip()
+                            if line.startswith(b'S04_CHILD_ERROR:') else 'NO_READY')
+                pytest.fail('S04_HARNESS_ERROR: old process failed preopen; ' + diagnostic)
             return proc
         proc.stdin.write(b'GO\n')
         await proc.stdin.drain()
         output=await asyncio.wait_for(proc.stdout.readline(),8)
         await asyncio.wait_for(proc.wait(),8)
-        assert proc.returncode==0, 'S04_HARNESS_ERROR: child exit unexpected'
+        if proc.returncode!=0:
+            diagnostic=(output.decode('ascii',errors='ignore').strip()
+                        if output.startswith(b'S04_CHILD_ERROR:') else 'NO_SAFE_RECEIPT')
+            pytest.fail('S04_HARNESS_ERROR: child exit unexpected; ' + diagnostic)
         return output.decode().strip()
     finally:
         if not handshake and proc.returncode is None:
@@ -119,7 +126,13 @@ async def _scenario(purpose,variant):
     _admission()
     with tempfile.TemporaryDirectory(prefix='s04t11-') as tmp:
         root=Path(tmp); db,email=_fixture(root,purpose)
-        payload={'db':str(db),'email':email}
+        # Checkout parents may not be traversable by the unprivileged UID.
+        # Stage the exact same test-only child source inside the disposable
+        # root, which remains accessible independently of GitHub workspace ACL.
+        child_script=root/'s04t11_child.py'
+        child_script.write_bytes(Path(__file__).read_bytes())
+        child_script.chmod(0o644)
+        payload={'db':str(db),'email':email,'child_script':str(child_script)}
         if variant=='new_connection':
             # File read is allowed but old UID is not authorized to create new RW handle.
             db.chmod(0o644);root.chmod(0o755)
@@ -169,5 +182,8 @@ if __name__=='__main__' and sys.argv[1:]==['--child']:
     try:
         request=json.loads(sys.stdin.readline())
         print(_child(request),flush=True)
-    except Exception:
+    except Exception as exc:
+        # Only a class name: never include paths, fixture IDs, secrets,
+        # exception messages or traceback in CI evidence.
+        print('S04_CHILD_ERROR:'+type(exc).__name__,flush=True)
         sys.exit(2)

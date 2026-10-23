@@ -33,3 +33,16 @@ semantic REDs remain frozen and independent.
 Do not modify production source, security oracle, schema, main, merge/deploy
 or request Codex Review. A 6/6 PASS denotes **hazard reproduction**, not a
 completed S04 security fix.
+
+## Raw T11 harness finding at 2f82d616
+
+CI #39816411436 reproduced **six S04_HARNESS_ERROR** cases, not security
+RED: the old UID successfully ran `id`, but all child calls returned status
+2 or failed to emit `READY`. Previous code launched a script from the GitHub
+checkout, which can have parent-directory traverse restrictions for `nobody`.
+The bounded harness repair stages its exact own script bytes into the
+existing disposable directory with mode 0644 and leaves the other admission,
+SQLite file, identity and security assertions intact. Any remaining failure
+only reports a child **exception class** (no paths/secrets) for diagnosis;
+this explanation is a hypothesis until exact-head CI confirms it. Neither the
+historical old binary nor Windows ACL is covered.
