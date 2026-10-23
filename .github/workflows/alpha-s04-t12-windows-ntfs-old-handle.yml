@@ -1,0 +1,75 @@
+name: Alpha S04 T12 Windows NTFS Old Process SQLite File Handle Physical
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_t12_windows_ntfs_old_handle_physical.py"
+      - ".github/workflows/alpha-s04-t12-windows-ntfs-old-handle.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t12-ntfs-disposable:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      S04_T12_STRICT: "1"
+      S04_T12_DISPOSABLE: "1"
+      S04_T12_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install minimal test-only tooling
+        run: python -m pip install "pytest==9.0.2"
+      - name: Verify exact HEAD and hosted Windows identity
+        shell: pwsh
+        run: |
+          if ("$(git rev-parse HEAD)" -ne $env:S04_T12_EXPECTED_HEAD) { throw 'S04_HARNESS_ERROR: exact HEAD mismatch' }
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'S04_HARNESS_ERROR: hosted runner only' }
+          whoami /groups
+          python -m pytest --collect-only -q se/tests/integration/s04_t12_windows_ntfs_old_handle_physical.py | Out-File -Encoding utf8 s04-t12-collection.txt
+          if (-not (Select-String -Path s04-t12-collection.txt -Pattern "6 tests collected")) { throw 'S04_HARNESS_ERROR: six selectors required' }
+      - name: Run six disposable Windows real-token NTFS boundary controls
+        shell: pwsh
+        run: |
+          python -m pytest -v -ra --tb=short se/tests/integration/s04_t12_windows_ntfs_old_handle_physical.py --junitxml=s04-t12-raw.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Enforce six raw JUnit identities and no false green
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          p=Path("s04-t12-raw.xml")
+          assert p.is_file(), "S04_HARNESS_ERROR: missing physical JUnit"
+          root=ET.parse(p).getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          assert len(suites)==1
+          cases=suites[0].findall("testcase")
+          expected=Counter({
+            f"test_t12_ntfs_old_user_disposable_file_boundary[{action}-{purpose}]":1
+            for action in ("new_write","restore","held_handle")
+            for purpose in ("registration","password_reset")
+          })
+          assert Counter(c.get("name") for c in cases)==expected, "S04_HARNESS_ERROR: identities missing or duplicate"
+          assert len(cases)==6
+          assert all(c.get("classname","").endswith("s04_t12_windows_ntfs_old_handle_physical") for c in cases)
+          assert all(suites[0].get(k)==v for k,v in {"tests":"6","failures":"0","errors":"0","skipped":"0"}.items())
+          assert all(c.find(k) is None for c in cases for k in ("failure","error","skipped"))
+          print("S04_T12_NTFS_6_PASS; OLD_HANDLE_RISK_REPRODUCED; PRODUCTION_NOT_FENCED")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-t12-ntfs-separate-user-raw
+          path: |
+            s04-t12-raw.xml
+            s04-t12-collection.txt
+          if-no-files-found: error
