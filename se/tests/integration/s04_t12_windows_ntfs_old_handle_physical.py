@@ -234,17 +234,24 @@ def _scenario(purpose,action):
             request={"db":str(db),"email":email,"username":name,"action":action,
                      "status":str(status),"go":str(go),"snapshot":str(snapshot)}
             config.write_text(json.dumps(request),encoding="utf-8")
-            handle=_spawn(name,password,script,config,root)
             if action=="held_handle":
+                # NEGATIVE: process MUST hold a writable SQLite handle
+                # before the controller changes NTFS permissions.
+                handle=_spawn(name,password,script,config,root)
                 _poll_ready(status,handle)
                 with _db(db) as controller:
                     controller.execute("""CREATE TRIGGER deny_old_consume BEFORE DELETE
                         ON pending_registrations BEGIN SELECT RAISE(ABORT,'FENCED'); END""")
                 status.unlink()
+            # The ACL cutover happens before all NEW process launches.
             _icacls(db,"/deny",f"{who}:(W)")
             _icacls(dbdir,"/deny",f"{who}:(WD,AD,DC,D)")
             if action=="held_handle":
                 go.write_text("GO",encoding="ascii")
+            else:
+                # This must not race with the ACL change: a pre-cutover
+                # process that writes successfully is not a false GREEN.
+                handle=_spawn(name,password,script,config,root)
             _wait(handle)
             receipt=status.read_text(encoding="ascii")
             if action=="new_write":

@@ -32,3 +32,13 @@ credential sharing, Windows real Host ACL, ACL inheritance/reparse bypass,
 SQLite WAL, crash, HA, production users, or trusted old-process drain.
 T05–T11 evidence and six mixed-version SEMANTIC_RED are unchanged. No
 production code/migration edits, no release, merge/deploy or Codex Review.
+
+## Required execution ordering (false-PASS guard)
+
+New-process and stale-restore controls create their Win32 process **after**
+NTFS deny ACEs are applied. The held-handle negative control must do the
+reverse: open/attest the old writable SQLite handle, then add a SQLite
+trigger and NTFS deny ACEs, then signal GO. A former T12 draft spawned all
+three variants before cutover, introducing a scheduling race that could have
+misclassified a pre-cutover write. No result from that draft may be used as
+security proof; recheck exact-head CI on the corrected variant.
