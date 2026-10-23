@@ -8,6 +8,7 @@ under a randomized temporary directory. Not the old shipped app binary.
 from __future__ import annotations
 
 import ctypes
+from contextlib import closing
 from ctypes import wintypes
 import json
 import os
@@ -219,7 +220,7 @@ def _scenario(purpose,action):
             dbdir.mkdir();outdir.mkdir()
             db=dbdir/"authority.sqlite3"
             email="t12-"+purpose+"@example.invalid"
-            with _db(db) as c:
+            with closing(_db(db)) as c:
                 c.execute("CREATE TABLE pending_registrations(email TEXT PRIMARY KEY)")
                 c.execute("INSERT INTO pending_registrations VALUES(?)",(email,))
             who=os.environ["COMPUTERNAME"]+"\\"+name
@@ -239,7 +240,7 @@ def _scenario(purpose,action):
                 # before the controller changes NTFS permissions.
                 handle=_spawn(name,password,script,config,root)
                 _poll_ready(status,handle)
-                with _db(db) as controller:
+                with closing(_db(db)) as controller:
                     controller.execute("""CREATE TRIGGER deny_old_consume BEFORE DELETE
                         ON pending_registrations BEGIN SELECT RAISE(ABORT,'FENCED'); END""")
                 status.unlink()
@@ -264,7 +265,7 @@ def _scenario(purpose,action):
             else:
                 assert receipt=="HELD_HANDLE_BYPASS", (
                     "S04_HARNESS_ERROR: old writable NTFS handle negative control missing")
-            with _db(db) as c:
+            with closing(_db(db)) as c:
                 count=c.execute("SELECT count(*) FROM pending_registrations").fetchone()[0]
                 if action=="held_handle":
                     assert count==0

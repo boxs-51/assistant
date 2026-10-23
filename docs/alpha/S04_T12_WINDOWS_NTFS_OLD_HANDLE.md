@@ -42,3 +42,14 @@ trigger and NTFS deny ACEs, then signal GO. A former T12 draft spawned all
 three variants before cutover, introducing a scheduling race that could have
 misclassified a pre-cutover write. No result from that draft may be used as
 security proof; recheck exact-head CI on the corrected variant.
+
+## Cleanup correction from first Windows physical run
+
+At exact HEAD `b1a6dd4d`, run `39893410702` produced six WinError 32
+cleanup failures when TemporaryDirectory tried to remove a still-open SQLite
+file. Python's `with sqlite3.connect(...)` commits/rolls back but does **not**
+close the connection; the test now uses `contextlib.closing` for every
+controller/verification connection. These results were HARNESS_ERROR, not
+NTFS security RED/PASS. After the separate cutover-order correction in
+`98738164`, the physical check must run again at this exact HEAD before
+any scoped PASS decision.
