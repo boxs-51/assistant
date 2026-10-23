@@ -1,0 +1,109 @@
+name: Alpha S04 T09 Historical SQLAlchemy OTP PG17 SQLite Redis Physical
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_t09_original_sqlalchemy_consumer_physical.py"
+      - ".github/workflows/alpha-s04-t09-historical-orm-physical.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t09-original-sqlalchemy-disposable:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: s04_t09_disposable
+          POSTGRES_USER: s04_t09_admin
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U s04_t09_admin -d s04_t09_disposable"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      S04_T09_PG_DSN: postgresql://s04_t09_admin@127.0.0.1:5432/s04_t09_disposable
+      S04_T09_DISPOSABLE: "1"
+      S04_T09_STRICT: "1"
+      S04_T09_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 40b502cbb1ae7d678e536e68b4359322bab467ca
+          path: s04-historical
+          persist-credentials: false
+          sparse-checkout: |
+            se/src/transport/gateway/authentication/services/otp_service.py
+            se/src/infrastructure/storage/repositories/user_data/pending_registrations.py
+            se/src/infrastructure/storage/models/sql/user_data/pending_registration.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install pinned isolated PG/SQLite/Redis/SQLAlchemy drivers
+        run: python -m pip install "pytest==9.0.2" "asyncpg==0.31.0" "redis==6.4.0" "sqlalchemy==2.0.44" "aiosqlite==0.21.0"
+      - name: Attest exact current and historical Git blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$S04_T09_HEAD"
+          test "$(git -C s04-historical rev-parse HEAD)" = "40b502cbb1ae7d678e536e68b4359322bab467ca"
+          test "$(git -C s04-historical hash-object se/src/transport/gateway/authentication/services/otp_service.py)" = "5a7e6bcdba3d5eec5fcf34a7e8760508a4401271"
+          test "$(git -C s04-historical hash-object se/src/infrastructure/storage/repositories/user_data/pending_registrations.py)" = "59a7b24560782b3f1336cfea0bfb7f4f67010112"
+          test "$(git -C s04-historical hash-object se/src/infrastructure/storage/models/sql/user_data/pending_registration.py)" = "c2a687774f0d82d15551ede43001895d321eef75"
+          python -m pytest --collect-only -q se/tests/integration/s04_t09_original_sqlalchemy_consumer_physical.py > s04-t09-collection.txt
+          grep -q "16 tests collected" s04-t09-collection.txt
+      - name: Run original historical SQLAlchemy PG17 SQLite and Redis controls
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra --tb=short se/tests/integration/s04_t09_original_sqlalchemy_consumer_physical.py --junitxml=s04-t09-raw.xml
+      - name: Require all exact sixteen physical cases, no skips/errors
+        if: always()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          from collections import Counter
+          from pathlib import Path
+          p=Path("s04-t09-raw.xml")
+          assert p.is_file(), "S04_HARNESS_ERROR: original ORM JUnit missing"
+          root=ET.parse(p).getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          assert len(suites)==1
+          cases=suites[0].findall("testcase")
+          modes=("pg_redis_positive","pg_get_open","pg_del_open",
+                 "pg_get_fenced","pg_del_fenced","pg_sql_revoked_redis_open",
+                 "sqlite_open","sqlite_guard")
+          expected=Counter({
+            f"test_t09_historical_sqlalchemy_otp_redeem_fence[{mode}-{purpose}]":1
+            for mode in modes for purpose in ("registration","password_reset")
+          })
+          assert Counter(c.get("name") for c in cases)==expected, "S04_HARNESS_ERROR: 16 identity mismatch"
+          assert len(cases)==16
+          assert all(c.get("classname","").endswith("s04_t09_original_sqlalchemy_consumer_physical") for c in cases)
+          assert all(suites[0].get(k)==v for k,v in {
+            "tests":"16","failures":"0","errors":"0","skipped":"0"}.items())
+          assert all(c.find(k) is None for c in cases for k in ("failure","error","skipped"))
+          print("S04_T09_ORIGINAL_SQLALCHEMY_REFERENCE_16_PASS; SHIPPED_BINARY_NOT_ATTESTED; S04_SECURITY_HOLD")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-t09-original-orm-redis-sqlite-pg17-raw
+          path: |
+            s04-t09-raw.xml
+            s04-t09-collection.txt
+          if-no-files-found: error

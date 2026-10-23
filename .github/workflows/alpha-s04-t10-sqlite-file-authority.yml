@@ -1,0 +1,78 @@
+name: Alpha S04 T10 SQLite Old-Writer File/Schema Physical Controls
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_t10_sqlite_file_authority_physical.py"
+      - ".github/workflows/alpha-s04-t10-sqlite-file-authority.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t10-sqlite-disposable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      S04_T10_DISPOSABLE: "1"
+      S04_T10_STRICT: "1"
+      S04_T10_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install minimal isolated pytest dependency
+        run: python -m pip install "pytest==9.0.2"
+      - name: Verify exact SHA, select 8 tests, record SQLite runtime version
+        shell: python
+        run: |
+          import os, pathlib, sqlite3, subprocess
+          sha=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
+          assert sha==os.environ["S04_T10_EXPECTED_SHA"], "S04_HARNESS_ERROR: unexpected HEAD"
+          print("T10_SQLITE_LIBRARY_VERSION",sqlite3.sqlite_version)
+          print("T10_EXACT_HEAD",sha)
+      - name: Run 8 disposable SQLite file and schema controls
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra --tb=short se/tests/integration/s04_t10_sqlite_file_authority_physical.py --junitxml=s04-t10-raw.xml
+      - name: Verify exact 8-case raw JUnit and negative controls
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path=Path("s04-t10-raw.xml")
+          assert path.is_file(), "S04_HARNESS_ERROR: missing raw JUnit"
+          root=ET.parse(path).getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          assert len(suites)==1
+          cases=suites[0].findall("testcase")
+          ids=("test_t10_01_open_connection_sees_committed_guard",
+               "test_t10_02_old_immediate_transaction_blocks_cutover_until_drained",
+               "test_t10_03_schema_write_capability_defeats_sqlite_trigger_negative_control",
+               "test_t10_04_file_restore_reintroduces_pre_fence_authority_negative_control")
+          expected=Counter({f"{i}[{p}]":1 for i in ids for p in ("registration","password_reset")})
+          assert Counter(c.get("name") for c in cases)==expected, "S04_HARNESS_ERROR: case identity drift"
+          assert len(cases)==8
+          assert all(c.get("classname","").endswith("s04_t10_sqlite_file_authority_physical") for c in cases)
+          assert all(suites[0].get(k)==v for k,v in {
+            "tests":"8","failures":"0","errors":"0","skipped":"0"}.items())
+          assert all(c.find(k) is None for c in cases for k in ("failure","error","skipped"))
+          print("S04_T10_SQLITE_8_PASS; NEGATIVE_CONTROLS_SHOW_TRIGGER_BYPASS; PRODUCT_HOLD")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-t10-sqlite-file-raw-${{ matrix.os }}
+          path: s04-t10-raw.xml
+          if-no-files-found: error

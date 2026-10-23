@@ -1,0 +1,93 @@
+name: Alpha S04 PG17 V2 consume-and-apply reference-only physical
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_v2_consume_apply_reference_physical.py"
+      - ".github/workflows/alpha-s04-v2-pg17-reference-physical.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  v2-pg17-reference-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: s04_v2_disposable
+          POSTGRES_USER: s04_reference
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U s04_reference -d s04_v2_disposable"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      S04_V2_STRICT: "1"
+      S04_V2_DISPOSABLE: "1"
+      S04_V2_PG_DSN: postgresql://s04_reference@127.0.0.1:5432/s04_v2_disposable
+      S04_V2_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install reference harness dependencies only
+        run: python -m pip install "pytest==9.0.2" "asyncpg==0.31.0"
+      - name: Attest exact HEAD and test collection
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$S04_V2_EXPECTED_SHA"
+          python -m pytest --collect-only -q se/tests/integration/s04_v2_consume_apply_reference_physical.py > s04-v2-collection.txt
+          grep -q "10 tests collected" s04-v2-collection.txt
+      - name: Run PG17 isolated reference transactions
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra --tb=short se/tests/integration/s04_v2_consume_apply_reference_physical.py --junitxml=s04-v2-reference.xml
+      - name: Verify ten exact raw JUnit identities and refuse false product PASS
+        if: always()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          path=Path("s04-v2-reference.xml")
+          assert path.is_file(), "S04_HARNESS_ERROR: raw JUnit not emitted"
+          root=ET.parse(path).getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          tests=[x for s in suites for x in s.findall("testcase")]
+          expected={
+              "test_s04_v2_registration_atomic_single_transaction",
+              "test_s04_v2_reset_updates_account_and_credential_version_atomically",
+              "test_s04_v2_two_consumers_one_effect_positive_and_denial",
+              "test_s04_v2_global_operation_conflict_and_exact_replay",
+              "test_s04_v2_wrong_otp_denial_committed_no_effect_then_success",
+              "test_s04_v2_fault_after_account_write_rolls_back_both",
+              "test_s04_v2_simulated_ack_loss_reconciles_same_operation",
+              "test_s04_v2_stale_epoch_and_frozen_authority_deny_without_effect",
+              "test_s04_v2_expiry_determined_after_lock_by_pg_clock",
+              "test_s04_v2_registration_existing_account_denies_without_consume",
+          }
+          ids=[x.get("name") for x in tests]
+          assert len(tests)==10 and set(ids)==expected, ("S04_HARNESS_ERROR: missing/duplicate",ids)
+          assert all(x.get("classname","").endswith("s04_v2_consume_apply_reference_physical") for x in tests)
+          assert len(suites)==1
+          assert all(suites[0].get(k)==v for k,v in {
+              "tests":"10","failures":"0","errors":"0","skipped":"0"}.items())
+          assert all(x.find(k) is None for x in tests for k in ("failure","error","skipped"))
+          print("S04_REFERENCE_ONLY_PG17_10_PASS; PRODUCT_S04_HOLD; MIXED_VERSION_REDS_UNCHANGED")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-pg17-v2-reference-only-raw
+          path: |
+            s04-v2-reference.xml
+            s04-v2-collection.txt
+          if-no-files-found: error

@@ -1,0 +1,111 @@
+name: Alpha S04 T08 Historic OTP Redeem Redis and SQL Dual Fence
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_t08_historical_consumer_dual_fence_physical.py"
+      - ".github/workflows/alpha-s04-t08-historical-consumer-fence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t08-disposable-redis-pg17-consume:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: s04_t08_disposable
+          POSTGRES_USER: s04_t08_admin
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U s04_t08_admin -d s04_t08_disposable"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      S04_T08_PG_DSN: postgresql://s04_t08_admin@127.0.0.1:5432/s04_t08_disposable
+      S04_T08_DISPOSABLE: "1"
+      S04_T08_STRICT: "1"
+      S04_T08_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 40b502cbb1ae7d678e536e68b4359322bab467ca
+          path: s04-historical
+          persist-credentials: false
+          sparse-checkout: |
+            se/src/transport/gateway/authentication/services/otp_service.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install isolated historical consumer dependencies
+        run: python -m pip install "pytest==9.0.2" "asyncpg==0.31.0" "redis==6.4.0"
+      - name: Exact new HEAD, pinned historical blob, and ten-case collection
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$S04_T08_HEAD"
+          test "$(git -C s04-historical rev-parse HEAD)" = "40b502cbb1ae7d678e536e68b4359322bab467ca"
+          test "$(git -C s04-historical hash-object se/src/transport/gateway/authentication/services/otp_service.py)" = "5a7e6bcdba3d5eec5fcf34a7e8760508a4401271"
+          python -m pytest --collect-only -q se/tests/integration/s04_t08_historical_consumer_dual_fence_physical.py > s04-t08-collected.txt
+          grep -q "10 tests collected" s04-t08-collected.txt
+      - name: Run ten pinned historic source redeem physical scenarios
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra --tb=short se/tests/integration/s04_t08_historical_consumer_dual_fence_physical.py --junitxml=s04-t08-raw.xml
+      - name: Reject missing, duplicate, failed, or skipped physical case evidence
+        if: always()
+        shell: python
+        run: |
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          from collections import Counter
+          p=Path("s04-t08-raw.xml")
+          assert p.is_file(), "S04_HARNESS_ERROR: raw JUnit absent"
+          root=ET.parse(p).getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          assert len(suites)==1
+          cases=suites[0].findall("testcase")
+          prefixes=(
+            "test_t08_01_historical_redis_get_del_one_time_positive",
+            "test_t08_02_redis_get_denied_sql_fallback_redeems",
+            "test_t08_03_redis_del_denied_sql_fallback_redeems",
+            "test_t08_04_get_denied_and_sql_delete_fenced",
+            "test_t08_05_del_denied_and_sql_delete_fenced",
+          )
+          expected=Counter({
+            f"{prefix}[{purpose}]":1
+            for prefix in prefixes
+            for purpose in ("registration","password_reset")
+          })
+          assert Counter(x.get("name") for x in cases)==expected, (
+            "S04_HARNESS_ERROR: exact ten test identities drifted")
+          assert len(cases)==10
+          assert all(x.get("classname","").endswith("s04_t08_historical_consumer_dual_fence_physical") for x in cases)
+          assert all(suites[0].get(k)==v for k,v in {
+            "tests":"10","failures":"0","errors":"0","skipped":"0"}.items())
+          assert all(x.find(k) is None for x in cases for k in ("failure","error","skipped"))
+          print("S04_T08_HISTORICAL_REDEEM_10_PASS; REAL_BINARY_UNVERIFIED; S04_PRODUCT_HOLD")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-t08-historical-redis-pg17-redeem-raw
+          path: |
+            s04-t08-raw.xml
+            s04-t08-collected.txt
+          if-no-files-found: error

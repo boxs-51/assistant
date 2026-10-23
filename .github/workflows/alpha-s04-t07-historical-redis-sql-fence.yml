@@ -1,0 +1,106 @@
+name: Alpha S04 T07 Historical OTP Source Redis SQL Fence Physical
+
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/s04_t07_historical_source_dual_fence_physical.py"
+      - ".github/workflows/alpha-s04-t07-historical-redis-sql-fence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  t07-historical-disposable:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: s04_t07_disposable
+          POSTGRES_USER: s04_t07_admin
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U s04_t07_admin -d s04_t07_disposable"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+    env:
+      S04_T07_PG_DSN: postgresql://s04_t07_admin@127.0.0.1:5432/s04_t07_disposable
+      S04_T07_DISPOSABLE: "1"
+      S04_T07_STRICT: "1"
+      S04_T07_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 40b502cbb1ae7d678e536e68b4359322bab467ca
+          path: s04-historical
+          persist-credentials: false
+          sparse-checkout: |
+            se/src/transport/gateway/authentication/services/otp_service.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install bounded test dependencies
+        run: python -m pip install "pytest==9.0.2" "asyncpg==0.31.0" "redis==6.4.0"
+      - name: Attest current and historical exact source identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$S04_T07_HEAD"
+          test "$(git -C s04-historical rev-parse HEAD)" = "40b502cbb1ae7d678e536e68b4359322bab467ca"
+          test "$(git -C s04-historical hash-object se/src/transport/gateway/authentication/services/otp_service.py)" = "5a7e6bcdba3d5eec5fcf34a7e8760508a4401271"
+          python -m pytest --collect-only -q se/tests/integration/s04_t07_historical_source_dual_fence_physical.py > s04-t07-collected.txt
+          grep -q "6 tests collected" s04-t07-collected.txt
+      - name: Run six real historical source and physical-backend controls
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -v -ra --tb=short se/tests/integration/s04_t07_historical_source_dual_fence_physical.py --junitxml=s04-t07-raw.xml
+      - name: Verify exact original-source physical controls, no false product green
+        if: always()
+        shell: python
+        run: |
+          from pathlib import Path
+          from collections import Counter
+          import xml.etree.ElementTree as ET
+          p=Path("s04-t07-raw.xml")
+          assert p.is_file(), "S04_HARNESS_ERROR: missing raw JUnit"
+          root=ET.parse(p).getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          assert len(suites)==1
+          cases=suites[0].findall("testcase")
+          expected=Counter({
+            "test_t07_pre_fence_historical_source_redis_positive_control[registration]":1,
+            "test_t07_pre_fence_historical_source_redis_positive_control[password_reset]":1,
+            "test_t07_redis_only_revoke_leaves_sql_fallback_semantic_hazard[registration]":1,
+            "test_t07_redis_only_revoke_leaves_sql_fallback_semantic_hazard[password_reset]":1,
+            "test_t07_dual_redis_sql_fence_historical_source_restart_denied[registration]":1,
+            "test_t07_dual_redis_sql_fence_historical_source_restart_denied[password_reset]":1
+          })
+          assert Counter(x.attrib.get("name") for x in cases)==expected, "S04_HARNESS_ERROR: identity mismatch"
+          assert len(cases)==6
+          assert all(x.attrib.get("classname","").endswith("s04_t07_historical_source_dual_fence_physical") for x in cases)
+          assert all(suites[0].attrib.get(k)==v for k,v in {
+            "tests":"6","failures":"0","errors":"0","skipped":"0"}.items())
+          assert all(c.find(k) is None for c in cases for k in ("failure","error","skipped"))
+          print("S04_T07_HISTORICAL_SOURCE_6_PASS; BINARY_NOT_ATTESTED; S04_PRODUCT_HOLD")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s04-t07-historical-source-dual-fence-raw
+          path: |
+            s04-t07-raw.xml
+            s04-t07-collected.txt
+          if-no-files-found: error

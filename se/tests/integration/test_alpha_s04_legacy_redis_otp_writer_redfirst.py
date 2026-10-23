@@ -209,3 +209,572 @@ def test_s04_legacy_first_cold_redis_must_not_issue_second_sql_otp(purpose):
             await engine.dispose()
 
     asyncio.run(run())
+
+# Mixed-version/admission questions are separately scoped from the
+# F-670-SEC-01 fix above. These are real Redis/PG17 semantic RED-first tests:
+# modern DB-only + older Redis, and old unconditional SET after new NX.
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_db_only_with_live_legacy_must_not_double_redeem(purpose):
+    """DB-only modern issuance cannot mint a second OTP alongside legacy Redis."""
+    async def run():
+        redis_url, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-db-only-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        legacy = redis.Redis.from_url(redis_url, decode_responses=True)
+        reader = None
+        try:
+            assert await legacy.ping(), "S04_HARNESS_ERROR: Redis unavailable"
+            old = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "legacy"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await legacy.set(key, old, ex=300) is True
+            assert await legacy.get(key) == old
+            assert await legacy.ttl(key) > 0
+            assert await _row_count(engine, email) == 0
+
+            modern_db_only = OTPStorageService(None, _factory(engine))
+            # A real SQL-only deployment used alongside a Redis-backed old
+            # binary is not proven to own the sole issuance authority.
+            await getattr(modern_db_only, save)(
+                email, {"value": "db-only-modern"}, "222222"
+            )
+            rows = await _row_count(engine, email)
+            reader = await _redis_driver(redis_url)
+            verifier = OTPStorageService(reader, _factory(engine))
+            original = await getattr(verifier, verify)(email, "111111")
+            second = await getattr(verifier, verify)(email, "222222")
+            replay = await getattr(verifier, verify)(email, "111111")
+            assert original == {"value": "legacy"}, (
+                "S04_HARNESS_ERROR: legacy OTP positive control unavailable"
+            )
+            assert second is None, (
+                "S04_MIXED_SEMANTIC_RED: DB-only modern and Redis legacy "
+                f"issued separately redeemable OTPs ({purpose}; sql_rows={rows})"
+            )
+            assert replay is None, "S04_MIXED_SEMANTIC_RED: legacy OTP replayed"
+            assert rows == 0, (
+                "S04_MIXED_SEMANTIC_RED: a second SQL authority was committed "
+                f"while unfenced legacy Redis was live ({purpose})"
+            )
+        finally:
+            if reader is not None:
+                await reader.disconnect()
+            await legacy.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await legacy.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_legacy_late_set_must_not_replace_modern_ack(purpose):
+    """An old unconditional Redis SET must not invalidate acknowledged modern NX."""
+    async def run():
+        redis_url, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-late-old-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        old_writer = redis.Redis.from_url(redis_url, decode_responses=True)
+        modern_driver = None
+        try:
+            assert await old_writer.ping(), "S04_HARNESS_ERROR: Redis unavailable"
+            modern_driver = await _redis_driver(redis_url)
+            modern = OTPStorageService(modern_driver, _factory(engine))
+            await getattr(modern, save)(
+                email, {"value": "modern-acknowledged"}, "222222"
+            )
+            modern_value = await old_writer.get(key)
+            assert modern_value is not None, (
+                "S04_HARNESS_ERROR: modern positive did not create OTP"
+            )
+            assert json.loads(modern_value)["otp"] == "222222"
+            assert await old_writer.ttl(key) > 0
+
+            # Genuine old Redis wire command: no SQL fence, no NX flag.
+            # This is NOT a real historical Python binary.
+            legacy_payload = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "old-late-writer"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await old_writer.set(key, legacy_payload, ex=300) is True
+            observed_after = await old_writer.get(key)
+            assert observed_after == modern_value, (
+                "S04_MIXED_SEMANTIC_RED: legacy SET overwrote a live "
+                f"acknowledged modern OTP ({purpose})"
+            )
+            verifier = OTPStorageService(modern_driver, _factory(engine))
+            assert await getattr(verifier, verify)(email, "222222") == {
+                "value": "modern-acknowledged"
+            }, "S04_MIXED_SEMANTIC_RED: modern acknowledged OTP was invalidated"
+            assert await getattr(verifier, verify)(email, "111111") is None, (
+                "S04_MIXED_SEMANTIC_RED: late legacy OTP gained authority"
+            )
+        finally:
+            if modern_driver is not None:
+                await modern_driver.disconnect()
+            await old_writer.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await old_writer.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_isolated_sql_only_positive_control(purpose):
+    """Healthy DB-only deployment remains useful, but is not mixed-mode proof."""
+    async def run():
+        _, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-sql-control-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        try:
+            sql_only = OTPStorageService(None, _factory(engine))
+            await getattr(sql_only, save)(
+                email, {"value": "sql-only-control"}, "333333"
+            )
+            assert await _row_count(engine, email) == 1
+            assert await getattr(sql_only, verify)(email, "333333") == {
+                "value": "sql-only-control"
+            }
+            assert await getattr(sql_only, verify)(email, "333333") is None
+            assert await _row_count(engine, email) == 0
+        finally:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_inmemory_modern_with_live_legacy_must_not_double_redeem(purpose):
+    """A process-local modern OTP is not exclusive while old Redis OTP lives."""
+    from se.src.infrastructure.config.schemas import DriverConfig
+    from se.src.infrastructure.storage.drivers.inmemory.driver import InMemoryDriver
+
+    async def run():
+        redis_url, _ = _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-memory-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        old = redis.Redis.from_url(redis_url, decode_responses=True)
+        redis_reader = None
+        memory = InMemoryDriver(DriverConfig(options={}))
+        try:
+            assert await old.ping(), "S04_HARNESS_ERROR: Redis unavailable"
+            old_payload = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "legacy-redis"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await old.set(key, old_payload, ex=300) is True
+            assert await old.get(key) == old_payload
+            assert await old.ttl(key) > 0
+            assert await _row_count(engine, email) == 0
+
+            await memory.connect()
+            modern_inmemory = OTPStorageService(memory, _factory(engine))
+            await getattr(modern_inmemory, save)(
+                email, {"value": "modern-inmemory"}, "222222"
+            )
+            assert await old.get(key) == old_payload, (
+                "S04_HARNESS_ERROR: legacy Redis fixture was unexpectedly modified"
+            )
+            redis_reader = await _redis_driver(redis_url)
+            old_verifier = OTPStorageService(redis_reader, _factory(engine))
+            original = await getattr(old_verifier, verify)(email, "111111")
+            second = await getattr(modern_inmemory, verify)(email, "222222")
+            replay = await getattr(modern_inmemory, verify)(email, "222222")
+            assert original == {"value": "legacy-redis"}, (
+                "S04_HARNESS_ERROR: legacy OTP positive control failed"
+            )
+            assert second is None, (
+                "S04_MIXED_SEMANTIC_RED: legacy Redis and modern InMemory "
+                f"accepted distinct OTPs for same principal/purpose ({purpose})"
+            )
+            assert replay is None, "S04_MIXED_SEMANTIC_RED: memory OTP replayed"
+        finally:
+            if redis_reader is not None:
+                await redis_reader.disconnect()
+            await memory.disconnect()
+            await old.delete(key, cooldown)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await old.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_mixed_isolated_inmemory_positive_control(purpose):
+    """Single process in-memory one-time behavior remains a healthy control."""
+    from se.src.infrastructure.config.schemas import DriverConfig
+    from se.src.infrastructure.storage.drivers.inmemory.driver import InMemoryDriver
+
+    async def run():
+        _targets()
+        engine = await _pg_engines()
+        email = f"s04-mixed-memory-control-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        memory = InMemoryDriver(DriverConfig(options={}))
+        try:
+            await memory.connect()
+            service = OTPStorageService(memory, _factory(engine))
+            await getattr(service, save)(
+                email, {"value": "memory-only-control"}, "333333"
+            )
+            assert await getattr(service, verify)(email, "333333") == {
+                "value": "memory-only-control"
+            }
+            assert await getattr(service, verify)(email, "333333") is None
+        finally:
+            await memory.disconnect()
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_acl_distinct_writer_epoch_denies_old_set(purpose):
+    """Physical Redis 7.4 ACL cutover, not a deployment approval."""
+    from redis.exceptions import ResponseError
+    from se.src.infrastructure.storage.interfaces.cache import CacheWriteCollision
+
+    async def run():
+        url, _ = _targets()
+        engine = await _pg_engines()
+        admin = redis.Redis.from_url(url, decode_responses=True)
+        uid = uuid4().hex[:16]
+        old_user, new_user = "s04_old_" + uid, "s04_new_" + uid
+        old_password, new_password = uuid4().hex, uuid4().hex
+        email = f"s04-acl-{uuid4().hex}@example.invalid"
+        reset = purpose == "password_reset"
+        key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cool = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        save = "save_pending_password_reset" if reset else "save_pending_registration"
+        verify = "verify_password_reset" if reset else "verify_and_get_data"
+        old = None
+        modern_driver = None
+        created = []
+        try:
+            assert await admin.ping()
+            assert str((await admin.info("server"))["redis_version"]).startswith("7.4.")
+            assert await admin.execute_command("ACL", "WHOAMI") == "default"
+            assert await admin.execute_command(
+                "ACL", "SETUSER", old_user, "reset", "on", ">" + old_password,
+                "~pending_reg:*", "~pending_password_reset:*",
+                "+ping", "+get", "+set", "+ttl", "+select"
+            )
+            created.append(old_user)
+            assert await admin.execute_command(
+                "ACL", "SETUSER", new_user, "reset", "on", ">" + new_password,
+                "~pending_reg:*", "~pending_password_reset:*",
+                "~otp_cooldown:*", "~password_reset_cooldown:*",
+                "+ping", "+get", "+getdel", "+set", "+ttl", "+select"
+            )
+            created.append(new_user)
+            old = redis.Redis(host="127.0.0.1", port=6379, db=15,
+                              username=old_user, password=old_password,
+                              decode_responses=True)
+            assert await old.ping()
+            legacy_value = json.dumps({
+                "purpose": purpose, "otp": "111111",
+                "user_data": {"value": "old"},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            assert await old.set(key, legacy_value, ex=300) is True
+            modern_url = ("redis://" + new_user + ":" + new_password
+                          + "@127.0.0.1:6379/15")
+            modern_driver = await _redis_driver(modern_url)
+            with pytest.raises(CacheWriteCollision):
+                await modern_driver.set(key, "new", 300)
+            assert await admin.get(key) == legacy_value
+            # An independent admin revokes the old writer before issuing new.
+            assert await admin.execute_command(
+                "ACL", "SETUSER", old_user, "reset", "on",
+                ">" + old_password, "~pending_reg:*", "~pending_password_reset:*",
+                "+ping", "+get", "+ttl", "+select"
+            )
+            for command in (
+                ("SET", key, "late", "EX", 300),
+                ("GETSET", key, "late"),
+                ("DEL", key),
+                ("EVAL", "return 1", 0),
+                ("ACL", "SETUSER", old_user, "+set"),
+            ):
+                with pytest.raises(ResponseError, match="(?i)permission"):
+                    await old.execute_command(*command)
+            assert await admin.get(key) == legacy_value
+            # External drain: never just flush/delete old OTP without receipt.
+            assert await admin.getdel(key) == legacy_value
+            assert await admin.get(key) is None
+            modern = OTPStorageService(modern_driver, _factory(engine))
+            await getattr(modern, save)(email, {"value": "modern"}, "222222")
+            assert json.loads(await admin.get(key))["otp"] == "222222"
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old.set(key, "rollback-attempt", ex=300)
+            verifier = OTPStorageService(modern_driver, _factory(engine))
+            assert await getattr(verifier, verify)(email, "222222") == {
+                "value": "modern"
+            }
+            assert await getattr(verifier, verify)(email, "222222") is None
+            assert await getattr(verifier, verify)(email, "111111") is None
+            assert await _row_count(engine, email) == 0
+        finally:
+            if modern_driver is not None:
+                await modern_driver.disconnect()
+            if old is not None:
+                await old.aclose()
+            await admin.delete(key, cool)
+            if created:
+                await admin.execute_command("ACL", "DELUSER", *created)
+            async with engine.begin() as conn:
+                await conn.execute(
+                    PendingRegistration.__table__.delete().where(
+                        PendingRegistration.email == email
+                    )
+                )
+            await admin.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_acl_shared_credentials_rollback_hazard_control(purpose):
+    """Expected hazard: a shared Redis ACL identity cannot distinguish writers."""
+    from redis.exceptions import ResponseError
+
+    async def run():
+        url, _ = _targets()
+        engine = await _pg_engines()
+        admin = redis.Redis.from_url(url, decode_responses=True)
+        name = "s04_shared_" + uuid4().hex[:16]
+        password = uuid4().hex
+        email = f"s04-acl-shared-{uuid4().hex}@example.invalid"
+        key = ("pending_password_reset:" if purpose == "password_reset"
+               else "pending_reg:") + email
+        old, modern = None, None
+        created = False
+        try:
+            assert str((await admin.info("server"))["redis_version"]).startswith("7.4.")
+            assert await admin.execute_command(
+                "ACL", "SETUSER", name, "reset", "on", ">" + password,
+                "~pending_reg:*", "~pending_password_reset:*",
+                "+ping", "+get", "+set", "+select"
+            )
+            created = True
+            old = redis.Redis(host="127.0.0.1", port=6379, db=15,
+                              username=name, password=password, decode_responses=True)
+            modern = redis.Redis(host="127.0.0.1", port=6379, db=15,
+                                 username=name, password=password, decode_responses=True)
+            assert await modern.set(key, "modern", ex=300, nx=True) is True
+            assert await old.set(key, "old-unconditional", ex=300) is True
+            assert await admin.get(key) == "old-unconditional", (
+                "S04_ACL_HARNESS_ERROR: shared credentials hazard absent"
+            )
+            # Revoking shared SET blocks both binaries. Restoring it reopens old SET.
+            assert await admin.execute_command("ACL", "SETUSER", name, "-set")
+            for client in (old, modern):
+                with pytest.raises(ResponseError, match="(?i)permission"):
+                    await client.set(key, "denied", ex=300)
+            assert await admin.execute_command("ACL", "SETUSER", name, "+set")
+            assert await admin.set(key, "modern-new", ex=300) is True
+            assert await old.set(key, "old-rollback", ex=300) is True
+            assert await admin.get(key) == "old-rollback", (
+                "S04_ACL_HARNESS_ERROR: unsafe rollback control not reproduced"
+            )
+        finally:
+            if old is not None:
+                await old.aclose()
+            if modern is not None:
+                await modern.aclose()
+            await admin.delete(key)
+            if created:
+                await admin.execute_command("ACL", "DELUSER", name)
+            await admin.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ("registration", "password_reset"))
+def test_s04_acl_failover_stale_replica_hazard_and_node_local_revocation(purpose):
+    """Real Redis master/replica manual promotion, NOT Sentinel or rollout proof.
+
+    First show stale candidate ACL can authorize old SET after promotion.
+    Then apply independent ACL revocation on the promoted node, and prove
+    old writer DENIED and modern NX/GETDEL one-time positive.
+    """
+    import os
+    from redis.exceptions import ResponseError
+
+    async def run():
+        if os.environ.get("S04_FAILOVER_STRICT") != "1":
+            pytest.fail("S04_FAILOVER_HARNESS_ERROR: strict physical gate required")
+        _targets()  # Separate Redis/PG17 disposable authority preflight.
+        hostname = os.environ.get("S04_FAILOVER_MASTER_NAME")
+        assert hostname and hostname.startswith("s04-acl-master-"), (
+            "S04_FAILOVER_HARNESS_ERROR: master hostname unavailable"
+        )
+        primary = redis.Redis(host="127.0.0.1", port=6381, db=15,
+                              decode_responses=True)
+        secondary = redis.Redis(host="127.0.0.1", port=6382, db=15,
+                                decode_responses=True)
+        suffix = uuid4().hex[:14]
+        old_user, new_user = "s04fo_old_" + suffix, "s04fo_new_" + suffix
+        old_password, new_password = uuid4().hex, uuid4().hex
+        email = f"s04fo-{uuid4().hex}@example.invalid"
+        key = ("pending_password_reset:" if purpose == "password_reset"
+               else "pending_reg:") + email
+        old_on_primary = None
+        old_on_promoted = None
+        modern_on_promoted = None
+        created_primary, created_secondary = False, False
+
+        async def wait_replica():
+            for _ in range(120):
+                info = await secondary.info("replication")
+                if (info.get("role") == "slave"
+                        and info.get("master_link_status") == "up"):
+                    return
+                await asyncio.sleep(0.25)
+            pytest.fail("S04_FAILOVER_HARNESS_ERROR: replica link never READY")
+
+        async def wait_value(value):
+            for _ in range(100):
+                if await secondary.get(key) == value:
+                    return
+                await asyncio.sleep(0.1)
+            pytest.fail("S04_FAILOVER_HARNESS_ERROR: replication data not witnessed")
+
+        async def acl(admin, user, password, writable):
+            grants = ["+ping", "+select", "+get", "+ttl"]
+            if writable:
+                grants.extend(("+set", "+getdel"))
+            assert await admin.execute_command(
+                "ACL", "SETUSER", user, "reset", "on", ">" + password,
+                "~pending_reg:*", "~pending_password_reset:*", *grants
+            )
+
+        try:
+            assert await primary.ping() and await secondary.ping()
+            assert str((await primary.info("server"))["redis_version"]).startswith("7.4.")
+            assert str((await secondary.info("server"))["redis_version"]).startswith("7.4.")
+            assert (await primary.info("replication"))["role"] == "master"
+            await wait_replica()
+            await acl(primary, old_user, old_password, True)
+            created_primary = True
+            await acl(secondary, old_user, old_password, True)
+            created_secondary = True
+            old_on_primary = redis.Redis(
+                host="127.0.0.1", port=6381, db=15,
+                username=old_user, password=old_password,
+                decode_responses=True
+            )
+            assert await old_on_primary.ping()
+            modern_original = json.dumps({
+                "purpose": purpose, "otp": "222222",
+                "user_data": {"value": "acknowledged-before-promotion"}
+            })
+            assert await primary.set(key, modern_original, ex=300, nx=True) is True
+            await wait_value(modern_original)
+
+            # Cut off the old principal on master only; independently
+            # configure stale privileges on candidate replica as an adversary.
+            await acl(primary, old_user, old_password, False)
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old_on_primary.set(key, "old-master-blocked", ex=300)
+            await acl(secondary, old_user, old_password, True)
+            assert await secondary.execute_command("REPLICAOF", "NO", "ONE")
+            assert (await secondary.info("replication"))["role"] == "master"
+            old_on_promoted = redis.Redis(
+                host="127.0.0.1", port=6382, db=15,
+                username=old_user, password=old_password,
+                decode_responses=True
+            )
+            assert await old_on_promoted.ping()
+            # NEGATIVE CONTROL: stale ACL on promoted node permits unsafe SET.
+            assert await old_on_promoted.set(key, "old-after-promotion", ex=300) is True
+            assert await secondary.get(key) == "old-after-promotion", (
+                "S04_FAILOVER_HARNESS_ERROR: stale replica ACL hazard absent"
+            )
+
+            # Trusted control must revoke on the ACTUAL promoted node.
+            await acl(secondary, old_user, old_password, False)
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old_on_promoted.set(key, "late-after-revocation", ex=300)
+            assert await secondary.getdel(key) == "old-after-promotion"
+            await acl(secondary, new_user, new_password, True)
+            modern_on_promoted = redis.Redis(
+                host="127.0.0.1", port=6382, db=15,
+                username=new_user, password=new_password,
+                decode_responses=True
+            )
+            assert await modern_on_promoted.ping()
+            assert await modern_on_promoted.set(
+                key, "new-promoted-epoch", ex=300, nx=True
+            ) is True
+            with pytest.raises(ResponseError, match="(?i)permission"):
+                await old_on_promoted.set(key, "old-rollback", ex=300)
+            assert await modern_on_promoted.getdel(key) == "new-promoted-epoch"
+            assert await modern_on_promoted.getdel(key) is None
+        finally:
+            if old_on_primary is not None:
+                await old_on_primary.aclose()
+            if old_on_promoted is not None:
+                await old_on_promoted.aclose()
+            if modern_on_promoted is not None:
+                await modern_on_promoted.aclose()
+            await primary.delete(key)
+            await secondary.delete(key)
+            if created_primary:
+                await primary.execute_command("ACL", "DELUSER", old_user)
+            if created_secondary:
+                await secondary.execute_command("ACL", "DELUSER", old_user, new_user)
+            # Restore physical follower for the next parametrized test.
+            await secondary.execute_command("REPLICAOF", hostname, 6379)
+            await wait_replica()
+            await secondary.aclose()
+            await primary.aclose()
+    asyncio.run(run())
