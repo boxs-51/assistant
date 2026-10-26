@@ -53,3 +53,7 @@ Documentation-only updates may improve navigation/status without source changes.
 
 ## Execution tracker (created after first documentation normalization)
 The development-line master issue is [#657](https://github.com/boxs-51/assistant/issues/657). **S01 #658** is CLOSED for evidence inventory only; **S02 #659** and **S03 #660** are scoped PASS/MERGED_ALPHA. **S04 #661**, **S05 #662**, **S06 #663**, **S07 #664** and **S09 #665** remain open; optional S08 stays planned under [#654](https://github.com/boxs-51/assistant/issues/654). Owner-domain issues #649–#656 retain separate obligations; closed stage ≠ release certification.
+
+## S04 development evidence update — 2026-10-26 (newer than the historical 2026-10-21 post-S03 checkpoint)
+
+S04 is no longer *not started* as a research/physical-test activity: [Draft PR #670](https://github.com/boxs-51/assistant/pull/670) and [Draft PR #671](https://github.com/boxs-51/assistant/pull/671) contain unmerged experimental work. **S04 technical/security gate is still HOLD/BLOCKED_P1**, with six independently observed mixed-OTP semantic RED cases. PR #671 `b20a925b` has 42 successful checks and one intentional negative failure; T12 Windows physical six-case hazard reproduction passed. These are **branch-specific**, not `alpha` merge-head evidence. See [S04 live evidence and remaining gates](S04_LIVE_EVIDENCE_20261026.md). Earlier dated checkpoints above remain historical facts; this update is not authorization to merge/deploy or advance S05.
