@@ -42,6 +42,7 @@ from .transport.gateway.authentication.authentication import Authentication
 from .transport.gateway.authentication.authenticators.api_key_authenticator import APIKeyAuthenticator
 from .transport.gateway.authentication.authenticators.jwt_authenticator import JWTAuthenticator
 
+from .transport.gateway.authentication.services.otp_backend_admission import select_otp_cache_driver
 from .transport.gateway.authentication.services import (APIKeyService, LoginService, OAuthService, PasswordResetService,
 OTPStorageService, RegistrationService, TokenService, UserService, GuestSessionService)
 
@@ -934,7 +935,7 @@ def bootstrap_security(
             JWTAuthenticator(token_service, uow_factory),
         ]
     )
-    redis_driver = storage_engine.get_cache_driver()
+    redis_driver = select_otp_cache_driver(storage_engine, auth_enabled=config.auth.enable)
     otp_service = OTPStorageService(redis_driver if redis_driver else None, uow_factory)
     registration_service = RegistrationService(
         uow_factory,
